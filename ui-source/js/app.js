@@ -295,6 +295,7 @@
   {
     const legacy = $('#login-legacy');
     if (legacy) legacy.href = DP.legacyUrl($('#login-url').value.trim());
+    if (DP.isApk) legacy.style.display = 'none';
     const dv = $('#drawer-version');
     if (dv) dv.textContent = 'v' + DP.VERSION;
   }

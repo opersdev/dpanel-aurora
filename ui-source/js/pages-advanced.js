@@ -595,7 +595,7 @@
           ${DP.state.demo ? '' : `<p class="small muted">若使用网页 / PWA 方式访问，请将本页地址加入 DPanel 的 <span class="mono">app.cors</span> 配置；Android 壳无需设置。</p>`}
         </div>
         <div class="card"><div class="card-head"><h3>系统维护</h3></div>
-          ${[['check-update', 'sparkles', '检查更新'], ['panel-backup', 'download', '创建面板备份'], ['backup-list', 'file', '备份列表'], ['panel-usage', 'chart', '磁盘占用'], ['clear-cache', 'trash', '清理缓存'], ['legacy-ui', 'globe', '使用旧版界面']].map(([a, ic, t]) => `<button class="drawer-link" data-set="${a}">${icon(ic)}<span class="grow">${t}</span>${icon('chevron-right', 'sm')}</button>`).join('')}
+          ${[['check-update', 'sparkles', '检查更新'], ['panel-backup', 'download', '创建面板备份'], ['backup-list', 'file', '备份列表'], ['panel-usage', 'chart', '磁盘占用'], ['clear-cache', 'trash', '清理缓存']].concat(DP.isApk ? [] : [['legacy-ui', 'globe', '使用旧版界面']]).map(([a, ic, t]) => `<button class="drawer-link" data-set="${a}">${icon(ic)}<span class="grow">${t}</span>${icon('chevron-right', 'sm')}</button>`).join('')}
         </div>
         <div class="card"><div class="card-head"><h3>关于</h3></div>
           <div class="small muted">DPanel Mobile v${DP.VERSION} · 基于开源项目 donknap/dpanel 的 API 构建。<br>本项目与 DPanel 官方无关联。</div>

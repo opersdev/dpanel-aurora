@@ -4,7 +4,9 @@
   const DP = w.DP = w.DP || {};
   /* UI 版本：与仓库 Release tag 同步（v 去前缀），发版时三处一起改：
      core.js 此处 / android-app/app/build.gradle versionName / 设置页关于 */
-  DP.VERSION = '1.3.2';
+  DP.VERSION = '1.3.3';
+  /* Android 壳（UA 带 DPanelMobile 标记）内不提供「使用旧版界面」入口 */
+  DP.isApk = /DPanelMobile/i.test(navigator.userAgent);
 
   /* ---------------- DOM 小工具 ---------------- */
   const $ = (s, r) => (r || document).querySelector(s);
