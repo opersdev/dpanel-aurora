@@ -17,7 +17,8 @@ tests
 app/pro/**/.DS_Store
 docker/**/*.log
 .run/**.*
-build/**.*android-app/*.apk
+build/**.*
+android-app/*.apk
 android-app/*.apk.idsig
 android-app/aligned.apk
 android-app/release.jks
