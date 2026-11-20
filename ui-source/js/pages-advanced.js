@@ -237,7 +237,23 @@
       DP.state.noticeUnread = list.filter(n => !n.read).length;
       const badge = $('#notice-badge'); if (badge) badge.classList.toggle('hidden', !DP.state.noticeUnread);
       root.innerHTML = `<div class="page-head"><div><h2>通知中心</h2><p>${DP.state.noticeUnread} 条未读消息</p></div>${DP.iconBtn('refresh', 'refresh')}</div>` +
-        (list.length ? list.map(n => `<div class="item-card" data-id="${n.id}"><div class="row"><div class="avatar-sm ${n.type === 'alert' ? 'red' : n.type === 'cron' ? 'green' : 'blue'}">${icon(n.type === 'alert' ? 'alert' : n.type === 'cron' ? 'clock' : 'bell')}</div><div class="grow"><div class="title">${esc(n.title)}</div><div class="sub" style="white-space:normal">${esc(n.content)}</div></div>${!n.read ? '<i class="status-dot" style="color:var(--primary)"></i>' : ''}</div><div class="row between mt8"><span class="small muted">${DP.ago(n.createdAt)}</span><button class="link-btn" data-del="${n.id}">删除</button></div></div>`).join('') : DP.empty('暂无通知', 'bell'));
+        (list.length ? list.map(n => {
+          /* 后端 title 是 .imageImport 这类错误码，message 是 ["key","value"] JSON 数组 */
+          const ntitle = DP.terr(n.title);
+          let nmsg = '';
+          if (typeof n.message === 'string' && n.message) {
+            try {
+              const arr = JSON.parse(n.message);
+              if (Array.isArray(arr)) {
+                for (let i = 0; i + 1 < arr.length; i += 2) nmsg += (nmsg ? ' · ' : '') + arr[i] + ': ' + arr[i + 1];
+                if (arr.length === 1) nmsg = String(arr[0]);
+              } else nmsg = String(n.message);
+            } catch (e) { nmsg = n.message; }
+          }
+          const typeCls = n.type === 'error' ? 'red' : (n.type === 'success' || n.type === 'cron') ? 'green' : 'blue';
+          const typeIco = n.type === 'error' ? 'alert' : (n.type === 'success' || n.type === 'cron') ? 'check' : 'bell';
+          return `<div class="item-card" data-id="${n.id}"><div class="row"><div class="avatar-sm ${typeCls}">${icon(typeIco)}</div><div class="grow"><div class="title">${esc(ntitle)}</div><div class="sub" style="white-space:normal">${esc(nmsg)}</div></div>${!n.read ? '<i class="status-dot" style="color:var(--primary)"></i>' : ''}</div><div class="row between mt8"><span class="small muted">${DP.ago(n.createdAt)}</span><button class="link-btn" data-del="${n.id}">删除</button></div></div>`;
+        }).join('') : DP.empty('暂无通知', 'bell'));
       const r = root.querySelector('[data-act="refresh"]'); if (r) r.onclick = () => pages.notices.render(root);
       DP.on(root, 'click', '[data-del]', async (e, t) => { e.stopPropagation(); await safe(() => DP.api('/common/notice/delete', { id: [Number(t.dataset.del)] })); DP.toast('已删除', 'ok'); pages.notices.render(root); });
     }
@@ -579,7 +595,7 @@
           ${DP.state.demo ? '' : `<p class="small muted">若使用网页 / PWA 方式访问，请将本页地址加入 DPanel 的 <span class="mono">app.cors</span> 配置；Android 壳无需设置。</p>`}
         </div>
         <div class="card"><div class="card-head"><h3>系统维护</h3></div>
-          ${[['check-update', 'sparkles', '检查更新'], ['panel-backup', 'download', '创建面板备份'], ['backup-list', 'file', '备份列表'], ['panel-usage', 'chart', '磁盘占用'], ['clear-cache', 'trash', '清理缓存']].map(([a, ic, t]) => `<button class="drawer-link" data-set="${a}">${icon(ic)}<span class="grow">${t}</span>${icon('chevron-right', 'sm')}</button>`).join('')}
+          ${[['check-update', 'sparkles', '检查更新'], ['panel-backup', 'download', '创建面板备份'], ['backup-list', 'file', '备份列表'], ['panel-usage', 'chart', '磁盘占用'], ['clear-cache', 'trash', '清理缓存'], ['legacy-ui', 'globe', '使用旧版界面']].map(([a, ic, t]) => `<button class="drawer-link" data-set="${a}">${icon(ic)}<span class="grow">${t}</span>${icon('chevron-right', 'sm')}</button>`).join('')}
         </div>
         <div class="card"><div class="card-head"><h3>关于</h3></div>
           <div class="small muted">DPanel Mobile v${DP.VERSION} · 基于开源项目 donknap/dpanel 的 API 构建。<br>本项目与 DPanel 官方无关联。</div>
@@ -590,8 +606,26 @@
         const a = t.dataset.set;
         if (a === 'check-update') await safe(async () => { const d = await DP.api('/common/panel/check-new-version', {}); DP.sheet({ title: '检查更新', body: `<div class="card"><div class="mid bold">${esc(d.version || '已是最新版本')}</div><div class="small muted mt8">${esc(d.changelog || '当前已是最新版本。')}</div></div>`, actions: d.url ? `<a class="btn primary block" href="${esc(d.url)}" target="_blank" rel="noopener">查看发布说明</a>` : '' }); });
         if (a === 'panel-backup') await safe(async () => { await DP.api('/common/panel/backup', {}); DP.toast('备份任务已提交', 'ok'); });
-        if (a === 'clear-cache') await safe(async () => { await DP.api('/common/setting/cache', { key: '', value: '', keep: false }); DP.toast('缓存已清理', 'ok'); });
-        if (a === 'panel-usage') await safe(async () => { const d = await DP.api('/common/panel/usage', {}); DP.sheet({ title: '磁盘占用', body: `<div class="card tight"><div class="row between"><span class="small muted">Docker 总占用</span><span class="small bold">${DP.fmtBytes(d.size)}</span></div><div class="row between"><span class="small muted">备份占用</span><span class="small bold">${DP.fmtBytes(d.backupSize)}</span></div><div class="row between"><span class="small muted">存储卷</span><span class="small bold">${DP.fmtBytes(d.volumeSize)}</span></div></div>` }); });
+        if (a === 'clear-cache') await safe(async () => {
+          /* 后端无清理接口；清理本地缓存（HTTP 缓存 + 会话存储），保留登录态与服务器配置 */
+          try { if (window.caches) { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } } catch (e) {}
+          const keep = ['dpanel-mobile-v1', 'dpanel-theme'];
+          const drop = [];
+          for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (!keep.includes(k)) drop.push(k); }
+          drop.forEach(k => localStorage.removeItem(k));
+          try { sessionStorage.clear(); } catch (e) {}
+          DP.toast(drop.length ? `已清理本地缓存（${drop.length} 项）` : '本地缓存已清理', 'ok');
+        });
+        if (a === 'legacy-ui') await safe(async () => DP.confirm({ title: '使用旧版界面', text: '将打开 DPanel 官方原版管理界面（后端内置），新界面登录状态不受影响。', okText: '打开', onOk: () => window.open(DP.legacyUrl(), '_blank') }));
+        if (a === 'panel-usage') await safe(async () => {
+          const d = await DP.api('/common/panel/usage', {});
+          const rows = (d.pathUsage || []).map(p => `<div class="row between" style="border-top:1px solid var(--line)"><span class="small muted">${esc(p.name || p.value || '—')}</span><span class="small bold">${esc(p.usedSize || DP.fmtBytes(p.used))} · ${Number(p.usedPercent || 0).toFixed(1)}%</span></div>`).join('');
+          DP.sheet({ title: '磁盘占用', body: `<div class="card tight">
+            <div class="row between"><span class="small muted">磁盘总容量</span><span class="small bold">${DP.fmtBytes(d.diskUsage)}</span></div>
+            <div class="row between" style="border-top:1px solid var(--line)"><span class="small muted">面板数据占用</span><span class="small bold">${DP.fmtBytes(d.panelUsage)}</span></div>
+            ${rows ? `<div class="row" style="margin-top:6px"><span class="small muted">明细</span></div>${rows}` : ''}
+          </div>` });
+        });
         if (a === 'backup-list') await safe(async () => { const d = await DP.api('/common/panel/backup-list', {}); DP.sheet({ title: '备份列表', full: true, body: (d.list || []).length ? d.list.map(b => `<div class="item-card"><div class="row"><div class="avatar-sm blue">${icon('file')}</div><div class="grow"><div class="title mono">${esc(b.name)}</div><div class="sub">${DP.fmtBytes(b.size)} · ${DP.fmtTime(b.createdAt)}</div></div></div></div>`).join('') : DP.empty('暂无备份', 'file') }); });
       });
     }

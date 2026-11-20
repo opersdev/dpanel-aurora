@@ -443,10 +443,52 @@
         const a = t.dataset.more; DP.closeSheet();
         if (a === 'info') return DP.prompt({ title: '重命名容器', label: '新名称', onOk: async v => { await safe(() => DP.api('/app/container/update', { md5: id, name: v })); DP.toast('已保存', 'ok'); } });
         if (a === 'ports') return DP.toast('端口信息已在详情页展示', 'ok');
-        if (a === 'upgrade') return safe(async () => { const d = await DP.api('/app/container-upgrade/check', { containerId: id, force: true }); DP.toast(d && d.list ? '检查完成' : '已是最新版本', 'ok'); });
+        if (a === 'upgrade') return safe(() => this.upgradeSheet(id));
         if (a === 'backup') return DP.go('snapshots', { id });
         if (a === 'explorer') return DP.go('files', { mount: 'container:' + id });
       });
+    },
+    /* 镜像更新检查 + 一键升级：后端 /app/container-upgrade/check|upgrade */
+    async upgradeSheet(id) {
+      DP.sheet({ title: '镜像更新检查', body: '<div class="card"><div class="center small muted" style="padding:24px 0">正在对比远端镜像…</div></div>', actions: '<button class="btn ghost grow" data-act="cancel">关闭</button>' });
+      $('[data-act="cancel"]', $('#sheet-root')).onclick = DP.closeSheet;
+      const d = await DP.api('/app/container-upgrade/check', { containerId: id, force: true }).catch(e => { DP.fail(e); return null; });
+      if (!d) return;
+      if (d.message) { DP.sheet({ title: '镜像更新检查', body: `<div class="card"><div class="row"><div class="avatar-sm red">${icon('alert')}</div><div class="grow"><div class="mid bold">检查失败</div><div class="small muted" style="white-space:normal">${esc(d.message)}</div></div></div></div>`, actions: '<button class="btn ghost grow" data-act="cancel">关闭</button>' }); $('[data-act="cancel"]', $('#sheet-root')).onclick = DP.closeSheet; return; }
+      const has = !!d.upgrade;
+      const digests = (d.digestLocal || []).map(x => `<div class="small mono muted">${esc(DP.short(x, 34))}</div>`).join('');
+      const stTxt = d.status === 'ignoreAlways' || d.status === 'ignoreCurrent' ? '已设置忽略更新' : has ? '发现可用更新' : '已是最新版本';
+      const body = `<div class="card tight">
+        <div class="row"><div class="avatar-sm ${has ? 'green' : 'blue'}">${icon(has ? 'sparkles' : 'check')}</div><div class="grow"><div class="mid bold">${stTxt}</div><div class="small muted">${d.checkedAt ? '检查时间 ' + DP.fmtTime(d.checkedAt) : has ? '远端镜像比本地新' : '本地与远端镜像一致'}</div></div></div>
+        ${d.digest ? `<div class="row" style="margin-top:10px"><span class="small muted">远端摘要</span></div><div class="small mono muted" style="white-space:normal">${esc(DP.short(d.digest, 34))}</div>` : ''}
+        ${digests ? `<div class="row" style="margin-top:6px"><span class="small muted">本地摘要</span></div>${digests}` : ''}
+        ${has ? '<p class="small muted mt8">升级会停止并删除旧容器，使用相同配置基于新镜像重建（默认创建快照以便回滚）。</p>' : ''}
+      </div>`;
+      const actions = has
+        ? '<button class="btn ghost grow" data-act="cancel">关闭</button><button class="btn primary grow" data-act="do-upgrade">一键升级</button>'
+        : '<button class="btn ghost grow" data-act="cancel">关闭</button>';
+      DP.sheet({ title: '镜像更新检查', body, actions });
+      $('[data-act="cancel"]', $('#sheet-root')).onclick = DP.closeSheet;
+      const go = $('[data-act="do-upgrade"]', $('#sheet-root'));
+      if (go) go.onclick = () => {
+        DP.confirm({
+          title: '确认升级容器', text: '容器将短暂停止服务，升级后自动以原配置启动。是否继续？', okText: '开始升级',
+          onOk: async () => {
+            go.disabled = true; go.textContent = '升级中…';
+            try {
+              /* upgrade 是同步接口：停止→重建→启动完成后才返回；进度走 notice WS */
+              const r = await DP.api('/app/container-upgrade/upgrade', { md5: id, enableBak: true, enableResetImageConfig: false }, { timeout: 0 });
+              DP.closeSheet();
+              DP.toast('容器已升级完成', 'ok');
+              if (r && r.containerId && r.containerId !== id) DP.toast('容器 ID 已更新：' + DP.short(r.containerId, 12), 'info');
+              DP.go('containers');
+            } catch (e) {
+              go.disabled = false; go.textContent = '一键升级';
+              DP.fail(e);
+            }
+          }
+        });
+      };
     }
   };
 

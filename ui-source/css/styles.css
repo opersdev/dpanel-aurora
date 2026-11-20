@@ -87,6 +87,8 @@ button{cursor:pointer;border:0;background:none;padding:0}
 .saved-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:12px;background:var(--surface-2);margin-bottom:7px;font-size:13px}
 .saved-item .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .login-foot{text-align:center;font-size:11px;color:var(--ink-3);margin:18px 0 0}
+.login-legacy{display:block;text-align:center;font-size:12px;color:var(--primary);margin:10px 0 0;text-decoration:none}
+.login-legacy:active{opacity:.7}
 
 /* ---------- 主框架 ---------- */
 .main-view{height:100%;display:flex;flex-direction:column}

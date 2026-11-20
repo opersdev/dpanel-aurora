@@ -130,7 +130,111 @@
 
   /* ---------------- API ---------------- */
   DP.apiError = class ApiError extends Error {
-    constructor(msg, code) { super(msg); this.code = code; }
+    constructor(msg, code, title, raw) { super(msg); this.code = code; this.title = title || ''; this.raw = raw || ''; }
+  };
+  /* 错误码翻译：后端 errorMessage 的 title 是 ".imageImport" 这类原始码。
+     映射来源：dpanel-src common/types/define/message.go + 控制器内硬编码。 */
+  DP.ERRMAP = {
+    '.unknow': '未知错误',
+    '.commonDataNotFoundOrDeleted': '数据不存在或已被删除',
+    '.commonNotFoundDPanel': '未找到 DPanel 容器',
+    '.commonIdAlreadyExists': '该标识已存在',
+    '.commonUploadFileEmpty': '上传文件为空',
+    '.commonUseWsConnect': '请通过 WebSocket 连接执行此操作',
+    '.commonCancelOperator': '操作已取消',
+    '.commonDeployIncorrect': '部署信息不正确',
+    '.commonExportInPath': '镜像已导出至',
+    '.panelProxyUnavailable': '面板代理不可用',
+    '.proLicenseFileIsCorrect': '专业版授权文件无效',
+    '.xkLicenseFileIsCorrect': '授权文件无效',
+    '.composeDeleteFileMustDeleteTask': '删除编排文件需同时删除关联任务',
+    '.composeNotFoundYaml': '未找到编排 yaml 文件',
+    '.composeDisableStorageType': '编排存储类型不可用',
+    '.composeDisableStore': '编排仓库不可用',
+    '.composeNameInvalid': '编排名称不合法',
+    '.composeEnvInvalid': '编排环境变量不合法',
+    '.composeParseYamlIncorrect': '编排 yaml 解析失败',
+    '.composeRelativeBindOnVolume': '编排不支持卷的相对路径挂载',
+    '.containerUpgradeDPanel': '不能升级 DPanel 自身容器',
+    '.containerUpgradeTaskRunning': '升级任务执行中，请稍后再试',
+    '.containerExplorerInvalidFilename': '文件名不合法',
+    '.containerExplorerUnzipTargetUnsupportedType': '该解压目标类型不支持',
+    '.containerExplorerEditDeleteUnsafe': '该文件不允许编辑或删除',
+    '.containerExplorerEditFileMaxSize': '文件超过可编辑大小限制',
+    '.containerExplorerContentUnsupportedType': '该文件类型不支持预览',
+    '.containerCronExpressionInCorrect': 'cron 表达式不正确',
+    '.containerCronTaskEmpty': '计划任务为空',
+    '.containerPortRequiresSystemStat': '需开启系统状态采集才能使用端口功能',
+    '.containerBackupImportFileFailed': '备份文件导入失败',
+    '.containerBackupImportFileInCorrect': '备份文件格式不正确',
+    '.containerBackupRestoreImportImageFailed': '恢复时导入镜像失败',
+    '.siteDomainExists': '域名已存在',
+    '.siteDomainNotFoundDPanel': '域名未关联 DPanel 容器',
+    '.siteDomainJoinDefaultNetworkFailed': '加入默认网络失败',
+    '.siteDomainCertIssueFailed': '证书签发失败',
+    '.siteDomainCertAddTxtFailed': '添加 DNS TXT 记录失败',
+    '.siteDomainCertHasBindDomain': '证书已绑定该域名',
+    '.siteDomainCertHasNotDNSName': '证书缺少 DNS 名称',
+    '.imagePullTagNotFound': '镜像 tag 不存在',
+    '.imagePullServerHttp': '镜像服务器 HTTP 错误',
+    '.imagePullRegistryBad': '镜像仓库不可用',
+    '.imageRemoteTagNoPermission': '无权限查询远端镜像',
+    '.imageBuildTypeEmpty': '构建类型为空',
+    '.imageBuildTypeConflict': '构建类型冲突',
+    '.imageImport': '镜像导入完成',
+    '.imageExport': '镜像导出完成',
+    '.gitPullEarlyEOF': '应用商店 Git 拉取中断（网络原因）',
+    '.swarmNotInit': 'Swarm 未初始化',
+    '.swarmNotManager': '当前节点不是 Swarm 管理节点',
+    '.systemEnvTlsInvalidCert': 'TLS 证书无效',
+    '.systemEnvApiTooOld': 'Docker API 版本过低',
+    '.systemEnvDockerApiFailed': 'Docker API 连接失败',
+    '.systemEnvCurrentCanNotDelete': '不能删除当前使用的环境',
+    '.systemEnvNameInvalid': '环境名称不合法',
+    '.systemStoreNotFoundGit': '未找到应用商店 Git 仓库',
+    '.systemStoreDownloadFailed': '应用商店下载失败',
+    '.settingBasicEmailInvalid': '邮件服务器配置无效',
+    '.usernameOrPasswordError': '用户名或密码错误',
+    '.userTwoFaEmpty': '请输入两步验证码',
+    '.userTwoFaNotCorrect': '两步验证码不正确',
+    '.unauthorized': '登录已过期，请重新登录',
+    '.userFounderExists': '创始人账号已存在',
+    '.userPasswordConfirmFailed': '两次输入的密码不一致',
+    '.userDisable': '账号已被禁用',
+    '.userFailedLockForever': '密码错误次数过多，账号已永久锁定',
+    '.userFailedLock': '密码错误次数过多，请稍后再试',
+    '.userResetTokenExpire': '重置链接已过期',
+    '.userNoPermission': '没有操作权限',
+    '.oauthAdminRequired': '需要 OAuth 管理员权限',
+    '.homeWsHostConsoleSshNotSetting': '主机终端未配置 SSH 连接',
+    '.tagUrlNotFound': '标签地址不存在'
+  };
+  /* 翻译错误码：'.imageImport' -> '镜像导入完成'；非映射码原样返回 */
+  DP.terr = function (title) {
+    if (!title) return '';
+    return DP.ERRMAP[String(title).trim()] || String(title);
+  };
+  /* 解析后端错误：error 字段可能是 messageError 序列化的 JSON（{"title":".xx","message":"[\"k\",\"v\"]"}），
+     也可能是普通字符串。返回 {text, title, kv} */
+  DP.parseErr = function (err) {
+    if (!err) return { text: '操作失败' };
+    if (typeof err === 'string') {
+      try {
+        const o = JSON.parse(err);
+        if (o && o.title) err = o;
+      } catch (e) { return { text: String(err) }; }
+    }
+    if (typeof err === 'object') {
+      const kv = [];
+      if (typeof err.message === 'string') {
+        try {
+          const arr = JSON.parse(err.message);
+          if (Array.isArray(arr)) for (let i = 0; i + 1 < arr.length; i += 2) kv.push([String(arr[i]), String(arr[i + 1])]);
+        } catch (e) { if (err.message) kv.push(['info', err.message]); }
+      }
+      return { text: DP.terr(err.title), title: err.title || '', kv, raw: JSON.stringify(err) };
+    }
+    return { text: String(err) };
   };
   DP.api = async function (path, params, opt) {
     opt = opt || {};
@@ -158,7 +262,14 @@
       try { json = await res.json(); } catch (e) { throw new DP.apiError('服务器返回了无效数据', res.status); }
       if (json.code !== 200 && res.status !== 200) {
         if (res.status === 401) { setTimeout(() => DP.logout(), 400); }
-        throw new DP.apiError(json.error || '请求失败（' + res.status + '）', res.status);
+        /* 后端错误体可能是 {"title":".xxx","message":"[...]"} 的 JSON 字符串，翻译后再提示 */
+        let msg = json.error || '', title = '';
+        try {
+          const o = typeof msg === 'string' ? JSON.parse(msg) : null;
+          if (o && o.title) { title = o.title; msg = DP.terr(o.title) + (typeof o.message === 'string' && o.message && !o.message.startsWith('[') ? '：' + o.message : ''); }
+        } catch (e) {}
+        const e = new DP.apiError(msg || '请求失败（' + res.status + '）', res.status, title, typeof json.error === 'string' ? json.error : '');
+        throw e;
       }
       return json.data;
     }
@@ -237,7 +348,22 @@
     toastTimer.push(t);
   };
   DP.loading = function (on) { const el = $('#loading'); if (el) el.classList.toggle('hidden', !on); };
-  DP.fail = function (e) { DP.toast(e && e.message || '操作失败', 'err'); };
+  DP.fail = function (e) {
+    if (!e) return DP.toast('操作失败', 'err');
+    /* messageError（title + kv 数组）完整提示：翻译标题 + key: value 明细 */
+    if (e.title && DP.ERRMAP[e.title]) {
+      const p = DP.parseErr(e.raw);
+      let msg = p.text;
+      if (p.kv && p.kv.length) msg += '\n' + p.kv.map(([k, v]) => k + ': ' + v).join('\n');
+      return DP.toast(msg, 'err');
+    }
+    DP.toast(e.message || '操作失败', 'err');
+  };
+  /* 「使用旧版界面」链接地址：优先用指定/登录框里的服务器地址，同源部署指向后端自带的官方 UI */
+  DP.legacyUrl = function (base) {
+    const b = String(base || (DP.state && DP.state.baseUrl) || location.origin).trim().replace(/\/+$/, '');
+    return b + '/dpanel/static/index.html';
+  };
 
   /* ---------------- 底部弹层 ---------------- */
   DP.sheet = function (opt) {

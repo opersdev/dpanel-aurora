@@ -73,6 +73,8 @@
     const clean = content.querySelector('#detail-body'); if (clean && clean._cleanup) clean._cleanup();
     if (route === 'login') {
       mainView.classList.add('hidden'); loginView.classList.remove('hidden');
+      const legacy = $('#login-legacy');
+      if (legacy) legacy.href = DP.legacyUrl($('#login-url').value.trim());
       current = route; DP.renderServers(); return;
     }
     if (!DP.state.token) {
@@ -269,6 +271,11 @@
   ['login-url', 'login-user', 'login-pass', 'login-code'].forEach(id => {
     $('#' + id).addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
   });
+  /* 服务器地址变化时同步「使用旧版」链接 */
+  $('#login-url').addEventListener('change', () => {
+    const legacy = $('#login-legacy');
+    if (legacy) legacy.href = DP.legacyUrl($('#login-url').value.trim());
+  });
 
   /* ---------------- 底部导航 ---------------- */
   DP.on($('#bottom-nav'), 'click', 'button', (e, t) => {
@@ -285,6 +292,12 @@
   buildDrawer();
   /* 内嵌前端（同源部署）时，默认连接本面板，无需手填地址 */
   if (location.protocol.startsWith('http') && !$('#login-url').value) $('#login-url').value = location.origin;
+  {
+    const legacy = $('#login-legacy');
+    if (legacy) legacy.href = DP.legacyUrl($('#login-url').value.trim());
+    const dv = $('#drawer-version');
+    if (dv) dv.textContent = 'v' + DP.VERSION;
+  }
   if (DP.state.demo) {
     // 演示模式不跨会话保留，避免误连
     DP.state.demo = false; DP.state.token = '';
