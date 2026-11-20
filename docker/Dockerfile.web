@@ -1,21 +1,32 @@
-# DPanel + 移动端 UI（本仓库前端替换版）— 单架构 amd64 简化构建
-FROM golang:1.25-alpine AS builder
+# DPanel Aurora — 仅维护前端；Go 后端在构建时从上游 donknap/dpanel 拉取
+# 可用 --build-arg DPANEL_REF=<tag|branch> 锁定后端版本（默认 master）
+ARG GO_IMAGE=golang:1.25-alpine
+ARG RUN_IMAGE=alpine:3.21
+ARG DPANEL_REF=master
 
-RUN apk add --no-cache gcc musl-dev make git bash ca-certificates linux-headers
+FROM ${GO_IMAGE} AS builder
+
+ARG DPANEL_REF
+RUN apk add --no-cache gcc musl-dev git bash ca-certificates linux-headers
 ENV GOPROXY=https://goproxy.cn,direct
-WORKDIR /src
 
-COPY go.mod go.sum ./
-COPY app/agent/go.mod app/agent/go.sum ./app/agent/
-RUN go mod download
+# 1. 拉取上游后端源码（含 config.yaml / docker 入口脚本 / asset 嵌入目录）
+RUN git clone --depth 1 --branch ${DPANEL_REF} https://github.com/donknap/dpanel.git /build
+WORKDIR /build
 
-COPY ./ /src
+# 2. 注入本仓库前端并同步进静态资源
+COPY ui-source ./ui-source
+COPY sync-ui.sh ./sync-ui.sh
+RUN bash sync-ui.sh
 
-ARG APP_VERSION=2.0.0-ui
-RUN CGO_ENABLED=1 GOTOOLCHAIN=local go build -trimpath -tags "lite,w7_rangine_release,containers_image_openpgp" -ldflags "-s -w -X main.DPanelVersion=${APP_VERSION}" -o ./runtime/dpanel . \
+# 3. 编译后端（lite 模式；containers_image_openpgp 绕开 gpgme CGO 依赖）
+RUN CGO_ENABLED=1 GOTOOLCHAIN=local go build -trimpath \
+      -tags "lite,w7_rangine_release,containers_image_openpgp" \
+      -ldflags "-s -w -X main.DPanelVersion=aurora-${DPANEL_REF}" \
+      -o ./runtime/dpanel . \
     && chmod +x ./runtime/dpanel
 
-FROM alpine:3.21
+FROM ${RUN_IMAGE}
 
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories \
     && apk add --no-cache --update bash musl docker-cli docker-cli-compose docker-cli-buildx tzdata git openssh-client curl \
@@ -33,16 +44,17 @@ ENV DP_ACME_CONFIG_HOME=/dpanel/acme
 ENV DP_RUN_IN_CONTAINER=1
 ENV APP_NAME=dpanel
 ENV APP_SERVER_PORT=8080
-ENV APP_VERSION=2.0.0-ui
+ENV APP_VERSION=aurora
 ENV APP_ENV=lite
 ENV DOCKER_CONFIG=/dpanel/buildx
 
 VOLUME [ "/dpanel" ]
 
-COPY --from=builder /src/runtime/dpanel /app/server/dpanel
-COPY ./config.yaml /app/server/config.yaml
-COPY ./docker/script /app/script
-COPY ./docker/task /docker
+# 运行时文件（config.yaml / 入口脚本）取自上游，随 DPANEL_REF 版本保持一致
+COPY --from=builder /build/runtime/dpanel /app/server/dpanel
+COPY --from=builder /build/config.yaml /app/server/config.yaml
+COPY --from=builder /build/docker/script /app/script
+COPY --from=builder /build/docker/task /docker
 
 RUN chmod -R 755 /docker/* /app/server/dpanel \
     && sed -i 's/\r$//' /docker/entrypoint-lite.sh /app/server/config.yaml /app/script/*.sh 2>/dev/null || true

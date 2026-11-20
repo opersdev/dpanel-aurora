@@ -1,1 +1,0 @@
-../standards/projects/dpanel.md

@@ -1,1 +1,0 @@
-resolver {{range .Resolver}}{{.}} {{end}}valid=30s ipv6=off;

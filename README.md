@@ -65,7 +65,8 @@ docker run -d \
 - 镜像发布在 GHCR：`ghcr.io/opersdev/dpanel-aurora`
 - 每次推送到 `master` 自动构建 `latest`；推送 `v*` 标签会生成对应的版本 tag（如 `v1.0.0`）
 - 当前构建架构：`linux/amd64`
-- 构建方式：多阶段构建，第一阶段用 Go 1.25 编译 DPanel 后端（lite 模式），第二阶段基于 Alpine 3.21 打包
+- 构建方式：多阶段构建，第一阶段拉取上游 donknap/dpanel 源码并注入本仓库前端后编译（lite 模式），第二阶段基于 Alpine 3.21 打包
+- 后端版本锁定：`docker build --build-arg DPANEL_REF=<tag或分支>`，默认跟随上游 master
 
 ## 🛠️ 本地构建镜像
 
@@ -98,10 +99,14 @@ bash sync-ui.sh   # 将 ui-source 同步进 asset/static，随镜像一起打包
 ├── docs/                # 截图
 ├── android-app/         # 安卓 App 工程（WebView 壳，复用 ui-source）
 ├── ios/                 # iOS App 工程（SwiftUI + WKWebView 壳，复用 ui-source）
+├── docker/
+│   └── Dockerfile.web   # 镜像构建（后端构建时从上游拉取）
 ├── docker-compose.yml   # 一键部署
 ├── sync-ui.sh           # 前端源码 → 后端静态资源同步脚本
 └── android-app/sync-assets.sh  # 前端源码 → 安卓 assets 同步脚本
 ```
+
+> 本仓库**只维护前端与移动端**：Go 后端不在仓库内，构建镜像时自动从上游 [donknap/dpanel](https://github.com/donknap/dpanel) 拉取，与官方保持同步。
 
 ## 📱 移动端 App（Android / iOS）
 
