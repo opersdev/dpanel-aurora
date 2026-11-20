@@ -33,14 +33,35 @@ jobs:
           ./gradlew assembleRelease --no-daemon
           cp app/build/outputs/apk/release/app-release-unsigned.apk DPanel-unsigned.apk
 
+      # 配置了仓库 Secrets（ANDROID_JKS_BASE64 / ANDROID_KS_PASS / ANDROID_KEY_ALIAS / ANDROID_KEY_PASS）时
+      # 自动 zipalign + apksigner 签名，产出可直接安装的 DPanel-signed.apk
+      - name: Sign APK
+        working-directory: android-app
+        env:
+          ANDROID_JKS_BASE64: ${{ secrets.ANDROID_JKS_BASE64 }}
+          ANDROID_KS_PASS: ${{ secrets.ANDROID_KS_PASS }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
+        if: env.ANDROID_JKS_BASE64 != ''
+        run: |
+          echo "$ANDROID_JKS_BASE64" | base64 -d > release.jks
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)
+          "$BT/zipalign" -f -p 4 DPanel-unsigned.apk aligned.apk
+          "$BT/apksigner" sign --ks release.jks --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass "pass:$ANDROID_KS_PASS" --key-pass "pass:$ANDROID_KEY_PASS" \
+            --out DPanel-signed.apk aligned.apk
+          "$BT/apksigner" verify DPanel-signed.apk
+          rm -f release.jks aligned.apk
+          echo "APK signed: DPanel-signed.apk"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DPanel-unsigned-apk
-          path: android-app/DPanel-unsigned.apk
+          name: DPanel-apk
+          path: android-app/DPanel-*.apk
 
       - name: Publish to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: android-app/DPanel-unsigned.apk
+          files: android-app/DPanel-*.apk
