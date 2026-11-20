@@ -273,12 +273,13 @@
       if (!document.body.contains(root)) return;
       const list = d.list || [];
       root.innerHTML = `<div class="page-head"><div><h2>Docker 环境</h2><p>同时管理多台 Docker 主机</p></div>${DP.iconBtn('add', 'plus')}</div>` +
-        (list.length ? list.map(e => `<div class="item-card" data-name="${esc(e.name)}"><div class="row"><div class="avatar-sm ${e.default ? 'green' : 'blue'}">${icon('server')}</div><div class="grow"><div class="title">${esc(e.name)} ${e.default ? '<span class="chip green">当前</span>' : ''}</div><div class="sub mono">${esc(e.address || '')}</div></div><span class="chip ${e.enable ? 'green' : ''}">${e.enable ? '已启用' : '已停用'}</span></div>
-          <div class="action-row"><button class="action-btn" data-env="switch">${icon('check')}切换</button><button class="action-btn" data-env="stat">${icon('chart')}系统状态</button><button class="action-btn danger" data-env="del">${icon('trash')}删除</button></div></div>`).join('') : DP.empty('暂无环境', 'server'));
-      const a = root.querySelector('[data-act="add"]'); if (a) a.onclick = () => this.create(root);
+        (list.length ? list.map(e => `<div class="item-card" data-name="${esc(e.name)}"><div class="row"><div class="avatar-sm ${e.default ? 'green' : 'blue'}">${icon('server')}</div><div class="grow"><div class="title">${esc(e.title || e.name)} ${e.default ? '<span class="chip green">当前</span>' : ''}${e.remoteType && e.remoteType !== 'sock' ? `<span class="chip">${({ tcp: 'TCP', ssh: 'SSH', wsl: 'WSL' })[e.remoteType] || e.remoteType}</span>` : ''}</div><div class="sub mono">${esc(e.address || '')}</div></div><span class="chip ${e.enable ? 'green' : ''}">${e.enable ? '已启用' : '已停用'}</span></div>
+          <div class="action-row"><button class="action-btn" data-env="switch">${icon('check')}切换</button><button class="action-btn" data-env="edit">${icon('edit')}编辑</button><button class="action-btn" data-env="stat">${icon('chart')}系统状态</button><button class="action-btn danger" data-env="del">${icon('trash')}删除</button></div></div>`).join('') : DP.empty('暂无环境', 'server'));
+      const a = root.querySelector('[data-act="add"]'); if (a) a.onclick = () => this.form(root);
       DP.on(root, 'click', '[data-env]', async (e, t) => {
         e.stopPropagation(); const name = t.closest('.item-card').dataset.name, op = t.dataset.env;
         if (op === 'switch') await safe(async () => { await DP.api('/common/env/switch', { name }); DP.state.env = name; $('#env-name').textContent = name; DP.toast('已切换到 ' + name, 'ok'); DP.go('overview'); });
+        if (op === 'edit') return this.form(root, name);
         if (op === 'del') return DP.confirm({ title: '删除环境', text: `确定删除环境 ${name}？`, danger: true, okText: '删除', onOk: async () => { await safe(() => DP.api('/common/env/delete', { name: [name] })); DP.toast('已删除', 'ok'); pages.envs.render(root); } });
         if (op === 'stat') await safe(async () => {
           /* system-stat 只是采集开关；真实数据来自 get-stat-list（容器/主机）与 usage（磁盘），首次采样需数秒 */
@@ -324,18 +325,161 @@
         });
       });
     },
-    create(root) {
-      DP.sheet({ title: '添加 Docker 环境',
-        body: `<div class="form-field"><label>环境名称</label><input id="env-name" placeholder="my-nas"></div>
-          <div class="form-field"><label>连接地址</label><input id="env-addr" placeholder="tcp://192.168.1.20:2375 或 ssh://user@host:22"></div>
-          <p class="small muted">公网环境强烈建议启用 TLS，避免 Docker API 直接暴露。</p>`,
-        actions: `<button class="btn ghost grow" data-act="cancel">取消</button><button class="btn primary grow" data-act="ok">添加</button>` });
-      $('[data-act="cancel"]', $('#sheet-root')).onclick = DP.closeSheet;
-      $('[data-act="ok"]', $('#sheet-root')).onclick = async () => {
-        const name = $('#env-name').value.trim(), address = $('#env-addr').value.trim();
-        if (!name || !address) return DP.toast('请填写完整信息', 'err');
-        await safe(async () => { await DP.api('/common/env/create', { name, address, check: true }); DP.closeSheet(); DP.toast('环境已添加', 'ok'); pages.envs.render(root); });
-      };
+    async form(root, editName) {
+      /* 与原版 DPanel 对齐：sock 本地 Socket / tcp 远程 TCP(+TLS) / ssh SSH 远程(密码或私钥) / wsl */
+      let v = {}, cert = {};
+      if (editName) {
+        try {
+          const [detail, list] = await Promise.all([
+            DP.api('/common/env/get-detail', { name: editName }),
+            DP.api('/common/env/get-list', { enableCertContent: true }).catch(() => ({ list: [] })),
+          ]);
+          v = detail || {};
+          cert = (list.list || []).find(x => x.name === editName) || {};
+        } catch (e) { DP.fail(e); return; }
+      }
+      const sshInfo = v.sshServerInfo || {};
+      const initType = v.remoteType || 'sock';
+      const tcpAddr = (initType === 'tcp' && v.address || '').replace(/^tcp:\/\//, '');
+      const [tcpHost = '', tcpPort = ''] = tcpAddr.split(':');
+      const isEdit = !!editName;
+
+      const field = (label, input) => `<div class="form-field"><label>${label}</label>${input}</div>`;
+      DP.sheet({
+        title: isEdit ? '编辑 Docker 环境' : '添加 Docker 环境',
+        full: true,
+        body: `
+          <div class="form-field"><label>连接方式</label><div class="seg" id="env-type">
+            <button class="seg-item" data-t="sock">本地 Socket</button>
+            <button class="seg-item" data-t="tcp">远程 TCP</button>
+            <button class="seg-item" data-t="ssh">SSH 远程</button>
+            <button class="seg-item" data-t="wsl">WSL</button></div></div>
+          <div class="grid c2">
+            ${field('环境名称 *', `<input id="env-name" placeholder="my-nas" value="${esc(v.name || '')}" ${isEdit ? 'readonly style="opacity:.6"' : ''}>`)}
+            ${field('显示标题', `<input id="env-title" placeholder="NAS 主机" value="${esc(v.title || '')}">`)}
+          </div>
+
+          <div data-block="sock">
+            ${field('Socket 地址', `<input id="env-sock" value="${esc((initType === 'sock' && v.address) || 'unix:///var/run/docker.sock')}">`)}
+            <p class="small muted">连接面板所在宿主机的 Docker socket，Docker Desktop / Linux 默认无需修改。</p>
+          </div>
+
+          <div data-block="tcp" style="display:none">
+            <div class="grid c2">
+              ${field('主机 IP *', `<input id="env-tcp-host" placeholder="192.168.1.20" value="${esc(tcpHost)}">`)}
+              ${field('Docker API 端口', `<input id="env-tcp-port" type="number" inputmode="numeric" placeholder="2375" value="${esc(tcpPort)}">`)}
+            </div>
+            <p class="small muted">目标机需开放 Docker API（如 2375 / 2376），公网环境强烈建议启用 TLS。</p>
+            <label class="row between" style="padding:2px 3px 12px"><span class="small">启用 TLS 证书</span><input type="checkbox" id="env-tls" ${v.enableTLS ? 'checked' : ''} style="width:auto"></label>
+            <div data-block="tls" style="display:${v.enableTLS ? '' : 'none'}">
+              ${field('CA 证书（PEM 内容）', `<textarea id="env-tls-ca" rows="3" placeholder="-----BEGIN CERTIFICATE-----">${esc(cert.tlsCa || '')}</textarea>`)}
+              ${field('客户端证书（PEM 内容）', `<textarea id="env-tls-cert" rows="3" placeholder="-----BEGIN CERTIFICATE-----">${esc(cert.tlsCert || '')}</textarea>`)}
+              ${field('客户端私钥（PEM 内容）', `<textarea id="env-tls-key" rows="3" placeholder="${isEdit && cert.tlsKey ? '留空保持不变' : '-----BEGIN PRIVATE KEY-----'}">${esc(cert.tlsKey && cert.tlsKey.includes('***') ? '' : cert.tlsKey || '')}</textarea>`)}
+            </div>
+          </div>
+
+          <div data-block="ssh" style="display:none">
+            <div class="grid c2">
+              ${field('SSH 主机 IP *', `<input id="env-ssh-host" placeholder="192.168.1.20" value="${esc(sshInfo.address || '')}">`)}
+              ${field('SSH 端口', `<input id="env-ssh-port" type="number" inputmode="numeric" placeholder="22" value="${esc(sshInfo.port || '')}">`)}
+            </div>
+            <div class="grid c2">
+              ${field('SSH 用户名 *', `<input id="env-ssh-user" placeholder="root" value="${esc(sshInfo.username || '')}" autocomplete="off">`)}
+              ${field('认证方式', `<select id="env-ssh-auth"><option value="password"${sshInfo.authType !== 'privateKey' ? ' selected' : ''}>密码</option><option value="privateKey"${sshInfo.authType === 'privateKey' ? ' selected' : ''}>私钥</option></select>`)}
+            </div>
+            <div class="form-field" data-block="ssh-pass" style="display:${sshInfo.authType === 'privateKey' ? 'none' : ''}">
+              <label>SSH 密码</label><input id="env-ssh-pass" type="password" autocomplete="new-password" placeholder="${isEdit && sshInfo.password ? '留空保持不变' : 'SSH 登录密码'}">
+            </div>
+            <div class="form-field" data-block="ssh-key" style="display:${sshInfo.authType === 'privateKey' ? '' : 'none'}">
+              <label>私钥（PEM 内容）</label><textarea id="env-ssh-key" rows="4" placeholder="${isEdit && sshInfo.privateKey ? '留空保持不变' : '-----BEGIN OPENSSH PRIVATE KEY-----'}"></textarea>
+            </div>
+            ${field('远端 Docker 地址', `<input id="env-ssh-addr" value="${esc((initType === 'ssh' && v.address) || 'unix:///var/run/docker.sock')}">`)}
+            <p class="small muted">通过 SSH 登录目标机后连接其本机 Docker，默认 unix:///var/run/docker.sock 无需修改。</p>
+          </div>
+
+          <div data-block="wsl" style="display:none">
+            ${field('WSL 发行版名称 *', `<input id="env-wsl" placeholder="Ubuntu-22.04" value="${esc(initType === 'wsl' ? v.address.replace(/^wsl:\/\//, '') : '')}">`)}
+            <p class="small muted">仅限面板安装在 Windows 上时可用，容器类型固定为 Docker。</p>
+          </div>
+
+          <div class="grid c2">
+            ${field('容器类型', `<select id="env-dtype"><option value="docker"${v.dockerType !== 'podman' ? ' selected' : ''}>Docker</option><option value="podman"${v.dockerType === 'podman' ? ' selected' : ''}>Podman</option></select>`)}
+            ${field('系统状态统计', `<select id="env-stat"><option value="0">不开启</option><option value="1"${v.enableSystemStat ? ' selected' : ''}>开启（采集 CPU / 内存）</option></select>`)}
+          </div>
+          <label class="row between" style="padding:2px 3px 0"><span class="small">保存前测试连接</span><input type="checkbox" id="env-check" checked style="width:auto"></label>`,
+        actions: `<button class="btn ghost grow" data-act="cancel">取消</button><button class="btn primary grow" data-act="ok">${isEdit ? '保存' : '添加'}</button>`,
+        onOpen: (sheet) => {
+          const $s = sel => sheet.querySelector(sel);
+          const all = sel => [...sheet.querySelectorAll(sel)];
+          let cur = initType;
+          const paintSeg = () => all('#env-type .seg-item').forEach(b => b.classList.toggle('active', b.dataset.t === cur));
+          const paintBlocks = () => {
+            all('[data-block]').forEach(el => {
+              const k = el.dataset.block;
+              let on = k === cur;
+              if (cur === 'tcp' && k === 'tls') on = $s('#env-tls').checked;
+              if (cur === 'ssh' && k === 'ssh-pass') on = $s('#env-ssh-auth').value === 'password';
+              if (cur === 'ssh' && k === 'ssh-key') on = $s('#env-ssh-auth').value === 'privateKey';
+              el.style.display = on ? '' : 'none';
+            });
+            $s('#env-dtype').disabled = (cur === 'wsl');
+            if (cur === 'wsl') $s('#env-dtype').value = 'docker';
+          };
+          paintSeg(); paintBlocks();
+          DP.on($s('#env-type'), 'click', '.seg-item', (e, b) => { cur = b.dataset.t; paintSeg(); paintBlocks(); });
+          $s('#env-tls').onchange = paintBlocks;
+          $s('#env-ssh-auth').onchange = paintBlocks;
+
+          $s('[data-act="cancel"]').onclick = DP.closeSheet;
+          $s('[data-act="ok"]').onclick = async () => {
+            const name = $s('#env-name').value.trim();
+            const title = $s('#env-title').value.trim();
+            const type = cur;
+            const p = { name, title: title || name, remoteType: type, dockerType: $s('#env-dtype').value, check: $s('#env-check').checked };
+            if (!name) return DP.toast('请填写环境名称', 'err');
+            const PLACEHOLDER = '******';
+            if (type === 'sock') {
+              p.address = $s('#env-sock').value.trim() || 'unix:///var/run/docker.sock';
+            } else if (type === 'tcp') {
+              const host = $s('#env-tcp-host').value.trim(), port = $s('#env-tcp-port').value.trim() || '2375';
+              if (!host) return DP.toast('请填写主机 IP', 'err');
+              p.address = 'tcp://' + host + ':' + port;
+              if ($s('#env-tls').checked) {
+                const ca = $s('#env-tls-ca').value.trim(), c = $s('#env-tls-cert').value.trim(), key = $s('#env-tls-key').value.trim();
+                if (!ca || !c || (!key && !(isEdit && cert.tlsKey))) return DP.toast('请填写完整 TLS 证书', 'err');
+                p.enableTLS = true; p.tlsCa = ca; p.tlsCert = c; p.tlsKey = key || PLACEHOLDER;
+              }
+            } else if (type === 'ssh') {
+              const host = $s('#env-ssh-host').value.trim(), port = Number($s('#env-ssh-port').value.trim() || 22);
+              const user = $s('#env-ssh-user').value.trim();
+              if (!host || !user) return DP.toast('请填写 SSH 主机与用户名', 'err');
+              p.address = $s('#env-ssh-addr').value.trim() || 'unix:///var/run/docker.sock';
+              p.enableSSH = true;
+              const info = { address: host, port, username: user, authType: $s('#env-ssh-auth').value };
+              if (info.authType === 'password') {
+                const pass = $s('#env-ssh-pass').value;
+                if (!pass && !(isEdit && sshInfo.password)) return DP.toast('请填写 SSH 密码', 'err');
+                info.password = pass || PLACEHOLDER;
+              } else {
+                const key = $s('#env-ssh-key').value.trim();
+                if (!key && !(isEdit && sshInfo.privateKey)) return DP.toast('请填写私钥内容', 'err');
+                info.privateKey = key || PLACEHOLDER;
+              }
+              p.sshServerInfo = info;
+            } else if (type === 'wsl') {
+              const distro = $s('#env-wsl').value.trim();
+              if (!distro) return DP.toast('请填写 WSL 发行版名称', 'err');
+              p.address = 'wsl://' + distro;
+            }
+            await safe(async () => {
+              await DP.api('/common/env/create', p);
+              DP.closeSheet();
+              DP.toast(isEdit ? '环境已保存' : '环境已添加', 'ok');
+              pages.envs.render(root);
+            });
+          };
+        }
+      });
     }
   };
 
