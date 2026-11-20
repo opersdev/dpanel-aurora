@@ -2,7 +2,7 @@
 
 基于开源容器管理面板 [DPanel](https://github.com/donknap/dpanel) 的深度定制版本 —— 全新重写的响应式前端 UI，桌面端是完整的仪表盘布局，手机端自动切换为底部导航的 App 式交互，一套代码同时适配桌面 / 平板 / 手机。
 
-后端完全沿用 DPanel 原版 Go 服务，功能与 API 保持兼容；前端为纯原生 HTML/CSS/JS 实现（零框架、零构建依赖），已内嵌进镜像的静态资源。
+后端直接使用 DPanel 官方镜像（不拉源码、不编译 Go），功能与 API 保持兼容；前端为纯原生 HTML/CSS/JS 实现（零框架、零构建依赖），由镜像内置 nginx 直接提供，API / WebSocket 反向代理给官方后端。
 
 ![桌面端](docs/final-desktop.png)
 
@@ -45,8 +45,8 @@ docker run -d \
 
 启动后访问：
 
-- 面板：<http://localhost:8808/dpanel/ui>
-- 演示模式：<http://localhost:8808/dpanel/ui?demo=1>
+- 面板：<http://localhost:8808/>
+- 演示模式：<http://localhost:8808/?demo=1>
 
 ### 首次使用
 
@@ -65,8 +65,9 @@ docker run -d \
 - 镜像发布在 GHCR：`ghcr.io/opersdev/dpanel-aurora`
 - 每次推送到 `master` 自动构建 `latest`；推送 `v*` 标签会生成对应的版本 tag（如 `v1.0.0`）
 - 当前构建架构：`linux/amd64`
-- 构建方式：多阶段构建，第一阶段拉取上游 donknap/dpanel 源码并注入本仓库前端后编译（lite 模式），第二阶段基于 Alpine 3.21 打包
-- 后端版本锁定：`docker build --build-arg DPANEL_REF=<tag或分支>`，默认跟随上游 master
+- 构建方式：**直接 `FROM dpanel/dpanel:lite` 官方镜像**，只需安装 nginx + 复制前端文件，秒级构建、不拉后端源码、不编译 Go
+  - 官方后端挪到 8086 端口，nginx 监听 8080：`/` 提供本仓库前端，`/dpanel/api`、`/dpanel/ws` 反代官方后端
+- 后端版本锁定：`docker build --build-arg DPANEL_IMAGE=dpanel/dpanel:v2.5.1-lite`（换成任意官方 tag）；国内网络可用 `docker.m.daocloud.io/dpanel/dpanel:lite` 加速
 
 ## 🛠️ 本地构建镜像
 
@@ -79,34 +80,26 @@ docker build -f docker/Dockerfile.web -t dpanel-aurora:local .
 ## 🎨 修改前端 UI
 
 - 前端源码在 [`ui-source/`](ui-source/) 目录：`index.html` + `css/` + `js/`，纯原生实现，改完无需任何构建步骤
-- 同步到后端静态资源：
+- 重新 `docker build` 即生效（nginx 配置在 [`docker/nginx-ui.conf`](docker/nginx-ui.conf)，启动脚本在 [`docker/start.sh`](docker/start.sh)）
 
-```bash
-bash sync-ui.sh   # 将 ui-source 同步进 asset/static，随镜像一起打包
-```
-
-> `ui-source` 中的页面通过相对路径 `./css/...`、`./js/...` 引用资源，可直接用任意静态服务器本地预览。
+> `ui-source` 中的页面通过相对路径 `./css/...`、`./js/...` 引用资源，可直接用任意静态服务器本地预览（API 需另有后端或走镜像）。
 
 ## 📦 目录结构
 
 ```
-├── asset/static/        # 内嵌到后端的前端产物（由 ui-source 同步）
 ├── ui-source/           # 前端源码（HTML/CSS/JS，可直接修改）
-├── app/ common/ database/ ...  # DPanel 原版 Go 后端源码
 ├── docker/
-│   ├── Dockerfile.web   # 本仓库使用的镜像构建文件
-│   └── task/            # 容器入口脚本
+│   ├── Dockerfile.web   # 镜像构建：FROM 官方镜像 + nginx 替换前端
+│   ├── nginx-ui.conf    # nginx：前端入口 8080 / 反代 API·WS
+│   └── start.sh         # 容器入口：先起 nginx 再起官方后端
 ├── docs/                # 截图
 ├── android-app/         # 安卓 App 工程（WebView 壳，复用 ui-source）
 ├── ios/                 # iOS App 工程（SwiftUI + WKWebView 壳，复用 ui-source）
-├── docker/
-│   └── Dockerfile.web   # 镜像构建（后端构建时从上游拉取）
 ├── docker-compose.yml   # 一键部署
-├── sync-ui.sh           # 前端源码 → 后端静态资源同步脚本
 └── android-app/sync-assets.sh  # 前端源码 → 安卓 assets 同步脚本
 ```
 
-> 本仓库**只维护前端与移动端**：Go 后端不在仓库内，构建镜像时自动从上游 [donknap/dpanel](https://github.com/donknap/dpanel) 拉取，与官方保持同步。
+> 本仓库**只维护前端与移动端**：镜像直接基于官方 [dpanel/dpanel](https://github.com/donknap/dpanel) 镜像构建，后端与官方发版保持同步，无需维护任何 Go 代码。
 
 ## 📱 移动端 App（Android / iOS）
 

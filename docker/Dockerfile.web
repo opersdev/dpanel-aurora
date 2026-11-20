@@ -1,63 +1,26 @@
-# DPanel Aurora — 仅维护前端；Go 后端在构建时从上游 donknap/dpanel 拉取
-# 可用 --build-arg DPANEL_REF=<tag|branch> 锁定后端版本（默认 master）
-ARG GO_IMAGE=golang:1.25-alpine
-ARG RUN_IMAGE=alpine:3.21
-ARG DPANEL_REF=master
+# DPanel Aurora — 仅维护前端
+# 直接 FROM 官方镜像 dpanel/dpanel:lite：不拉后端源码、不编译 Go。
+# 官方后端挪到 8086 端口；nginx 监听 8080，对外提供本仓库前端（ui-source），
+# 并把 /dpanel/api、/dpanel/ws 反代给容器内的官方后端。
+# 如需锁定官方版本：--build-arg DPANEL_IMAGE=dpanel/dpanel:v2.5.1-lite
+ARG DPANEL_IMAGE=dpanel/dpanel:lite
+FROM ${DPANEL_IMAGE}
 
-FROM ${GO_IMAGE} AS builder
+USER root
 
-ARG DPANEL_REF
-RUN apk add --no-cache gcc musl-dev git bash ca-certificates linux-headers
-ENV GOPROXY=https://goproxy.cn,direct
+# 官方后端让出 8080 给 nginx 入口（前端 + 反向代理）
+ENV APP_SERVER_PORT=8086
 
-# 1. 拉取上游后端源码（含 config.yaml / docker 入口脚本 / asset 嵌入目录）
-RUN git clone --depth 1 --branch ${DPANEL_REF} https://github.com/donknap/dpanel.git /build
-WORKDIR /build
-
-# 2. 注入本仓库前端并同步进静态资源
-COPY ui-source ./ui-source
-COPY sync-ui.sh ./sync-ui.sh
-RUN bash sync-ui.sh
-
-# 3. 编译后端（lite 模式；containers_image_openpgp 绕开 gpgme CGO 依赖）
-RUN CGO_ENABLED=1 GOTOOLCHAIN=local go build -trimpath \
-      -tags "lite,w7_rangine_release,containers_image_openpgp" \
-      -ldflags "-s -w -X main.DPanelVersion=aurora-${DPANEL_REF}" \
-      -o ./runtime/dpanel . \
-    && chmod +x ./runtime/dpanel
-
-FROM ${RUN_IMAGE}
-
+# 国内构建拉不动基础镜像时：--build-arg DPANEL_IMAGE=docker.m.daocloud.io/dpanel/dpanel:lite
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories \
-    && apk add --no-cache --update bash musl docker-cli docker-cli-compose docker-cli-buildx tzdata git openssh-client curl \
-    && rm -f /usr/bin/docker-compose \
-    && mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    && apk add --no-cache nginx
 
-WORKDIR /app/server
+COPY ui-source/ /app/ui/
+COPY docker/nginx-ui.conf /etc/nginx/http.d/dpanel-ui.conf
+COPY docker/start.sh /app/start.sh
 
-ENV TZ=Asia/Shanghai
-ENV PATH="/app/server:${PATH}"
-ENV DOCKER_HOST=unix:///var/run/docker.sock
-ENV DP_SYSTEM_STORAGE_LOCAL_PATH=/dpanel
-ENV DP_DB_DATABASE=/dpanel/dpanel.db
-ENV DP_ACME_CONFIG_HOME=/dpanel/acme
-ENV DP_RUN_IN_CONTAINER=1
-ENV APP_NAME=dpanel
-ENV APP_SERVER_PORT=8080
-ENV APP_VERSION=aurora
-ENV APP_ENV=lite
-ENV DOCKER_CONFIG=/dpanel/buildx
-
-VOLUME [ "/dpanel" ]
-
-# 运行时文件（config.yaml / 入口脚本）取自上游，随 DPANEL_REF 版本保持一致
-COPY --from=builder /build/runtime/dpanel /app/server/dpanel
-COPY --from=builder /build/config.yaml /app/server/config.yaml
-COPY --from=builder /build/docker/script /app/script
-COPY --from=builder /build/docker/task /docker
-
-RUN chmod -R 755 /docker/* /app/server/dpanel \
-    && sed -i 's/\r$//' /docker/entrypoint-lite.sh /app/server/config.yaml /app/script/*.sh 2>/dev/null || true
+RUN chmod +x /app/start.sh \
+    && sed -i 's/\r$//' /app/start.sh /etc/nginx/http.d/dpanel-ui.conf
 
 EXPOSE 8080
-ENTRYPOINT [ "/docker/entrypoint-lite.sh" ]
+ENTRYPOINT [ "/app/start.sh" ]
