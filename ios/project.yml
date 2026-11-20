@@ -1,0 +1,57 @@
+name: DPanel
+options:
+  bundleIdPrefix: com.dpanel
+  createIntermediateGroups: true
+
+settings:
+  base:
+    MARKETING_VERSION: "1.7.1"
+    CURRENT_PROJECT_VERSION: 9
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  DPanel:
+    type: application
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: DPanel/App.swift
+      - path: DPanel/Assets.xcassets
+      - path: DPanel/Web
+        type: folder
+        buildPhase: resources
+    info:
+      path: DPanel/Info.plist
+      properties:
+        CFBundleDisplayName: DPanel
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # DPanel 面板多为 http+自签地址，放行明文请求
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dpanel.mobile
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ENABLE_BITCODE: NO
+
+schemes:
+  DPanel:
+    build:
+      targets:
+        DPanel: all
+    archive:
+      config: Release

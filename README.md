@@ -96,9 +96,31 @@ bash sync-ui.sh   # 将 ui-source 同步进 asset/static，随镜像一起打包
 │   ├── Dockerfile.web   # 本仓库使用的镜像构建文件
 │   └── task/            # 容器入口脚本
 ├── docs/                # 截图
+├── android-app/         # 安卓 App 工程（WebView 壳，复用 ui-source）
+├── ios/                 # iOS App 工程（SwiftUI + WKWebView 壳，复用 ui-source）
 ├── docker-compose.yml   # 一键部署
-└── sync-ui.sh           # 前端源码 → 静态资源同步脚本
+├── sync-ui.sh           # 前端源码 → 后端静态资源同步脚本
+└── android-app/sync-assets.sh  # 前端源码 → 安卓 assets 同步脚本
 ```
+
+## 📱 移动端 App（Android / iOS）
+
+同一套 `ui-source/` 前端，分别打包成安卓 APK 与 iOS IPA：
+
+### Android
+
+- 工程：[`android-app/`](android-app/)（WebView 壳，界面资源由 `sync-assets.sh` 从 `ui-source/` 同步进 assets）
+- 推送到 `master` 时 GitHub Actions 自动构建**未签名 APK**（`.github/workflows/build-android-apk.yml`），在 Actions 运行页下载 artifact `DPanel-unsigned-apk`
+- 本地构建：`bash android-app/sync-assets.sh && cd android-app && ./gradlew assembleRelease`
+
+### iOS
+
+- 工程：[`ios/`](ios/)（SwiftUI + WKWebView，XcodeGen 描述，详细说明见 [ios/README.md](ios/README.md)）
+- 推送到 `master` 时自动产出**未签名 IPA**（artifact `DPanel-unsigned-ipa`）
+- 未签名 IPA 需重签后安装：Windows 用 [Sideloadly](https://sideloadly.io/) + Apple ID（免费证书 7 天续签），或有 Mac/开发者账号直接签名
+- 零成本替代：iPhone Safari 打开面板地址 → 分享 → 添加到主屏幕（PWA）
+
+> 改前端 UI 只需改 `ui-source/`：Web/镜像/安卓 APK 都从它同步，一处修改三端生效。
 
 ## 🙏 致谢与许可
 

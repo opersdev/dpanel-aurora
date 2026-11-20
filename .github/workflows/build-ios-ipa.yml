@@ -1,0 +1,46 @@
+name: Build iOS IPA (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Archive (unsigned)
+        working-directory: ios
+        run: |
+          xcodebuild archive \
+            -project DPanel.xcodeproj \
+            -scheme DPanel \
+            -configuration Release \
+            -archivePath build/DPanel.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | tail -20
+
+      - name: Package unsigned IPA
+        working-directory: ios
+        run: |
+          mkdir -p build/Payload
+          cp -R build/DPanel.xcarchive/Products/Applications/DPanel.app build/Payload/
+          cd build && zip -qry DPanel-unsigned.ipa Payload
+          ls -la DPanel-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DPanel-unsigned-ipa
+          path: ios/build/DPanel-unsigned.ipa

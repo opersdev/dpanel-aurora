@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DPanel" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:statusBarColor">#5B5BD6</item>
+        <item name="android:navigationBarColor">#FBFAFE</item>
+        <item name="android:windowBackground">#FBFAFE</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>
