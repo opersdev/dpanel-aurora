@@ -385,12 +385,12 @@
             </div>
             <div class="grid c2">
               ${field('SSH 用户名 *', `<input id="env-ssh-user" placeholder="root" value="${esc(sshInfo.username || '')}" autocomplete="off">`)}
-              ${field('认证方式', `<select id="env-ssh-auth"><option value="password"${sshInfo.authType !== 'privateKey' ? ' selected' : ''}>密码</option><option value="privateKey"${sshInfo.authType === 'privateKey' ? ' selected' : ''}>私钥</option></select>`)}
+              ${field('认证方式', `<select id="env-ssh-auth"><option value="basic"${sshInfo.authType !== 'pem' ? ' selected' : ''}>密码</option><option value="pem"${sshInfo.authType === 'pem' ? ' selected' : ''}>私钥</option></select>`)}
             </div>
-            <div class="form-field" data-block="ssh-pass" style="display:${sshInfo.authType === 'privateKey' ? 'none' : ''}">
+            <div class="form-field" data-block="ssh-pass" style="display:${sshInfo.authType === 'pem' ? 'none' : ''}">
               <label>SSH 密码</label><input id="env-ssh-pass" type="password" autocomplete="new-password" placeholder="${isEdit && sshInfo.password ? '留空保持不变' : 'SSH 登录密码'}">
             </div>
-            <div class="form-field" data-block="ssh-key" style="display:${sshInfo.authType === 'privateKey' ? '' : 'none'}">
+            <div class="form-field" data-block="ssh-key" style="display:${sshInfo.authType === 'pem' ? '' : 'none'}">
               <label>私钥（PEM 内容）</label><textarea id="env-ssh-key" rows="4" placeholder="${isEdit && sshInfo.privateKey ? '留空保持不变' : '-----BEGIN OPENSSH PRIVATE KEY-----'}"></textarea>
             </div>
             ${field('远端 Docker 地址', `<input id="env-ssh-addr" value="${esc((initType === 'ssh' && v.address) || 'unix:///var/run/docker.sock')}">`)}
@@ -418,8 +418,8 @@
               const k = el.dataset.block;
               let on = k === cur;
               if (cur === 'tcp' && k === 'tls') on = $s('#env-tls').checked;
-              if (cur === 'ssh' && k === 'ssh-pass') on = $s('#env-ssh-auth').value === 'password';
-              if (cur === 'ssh' && k === 'ssh-key') on = $s('#env-ssh-auth').value === 'privateKey';
+              if (cur === 'ssh' && k === 'ssh-pass') on = $s('#env-ssh-auth').value === 'basic';
+              if (cur === 'ssh' && k === 'ssh-key') on = $s('#env-ssh-auth').value === 'pem';
               el.style.display = on ? '' : 'none';
             });
             $s('#env-dtype').disabled = (cur === 'wsl');
@@ -456,7 +456,7 @@
               p.address = $s('#env-ssh-addr').value.trim() || 'unix:///var/run/docker.sock';
               p.enableSSH = true;
               const info = { address: host, port, username: user, authType: $s('#env-ssh-auth').value };
-              if (info.authType === 'password') {
+              if (info.authType === 'basic') {
                 const pass = $s('#env-ssh-pass').value;
                 if (!pass && !(isEdit && sshInfo.password)) return DP.toast('请填写 SSH 密码', 'err');
                 info.password = pass || PLACEHOLDER;
