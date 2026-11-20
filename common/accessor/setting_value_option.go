@@ -1,0 +1,172 @@
+package accessor
+
+import (
+	"time"
+
+	"github.com/docker/docker/api/types"
+	types2 "github.com/donknap/dpanel/common/service/docker/types"
+	types3 "github.com/donknap/dpanel/common/types"
+	"github.com/go-webauthn/webauthn/webauthn"
+)
+
+type SettingValueOption struct {
+	UserSetting
+	System                      *System                      `json:"system,omitempty"`
+	Docker                      map[string]*types2.DockerEnv `json:"docker,omitempty"`
+	DiskUsage                   *DiskUsage                   `json:"diskUsage,omitempty"`
+	TwoFa                       *TwoFa                       `json:"twoFa,omitempty"`
+	Passkey                     *Passkey                     `json:"passkey,omitempty"`
+	ContainerCheckIgnoreUpgrade ContainerCheckIgnoreUpgrade  `json:"containerCheckIgnoreUpgrade,omitempty"`
+	DPanelInfo                  *types3.DPanelInfo           `json:"DPanelInfo,omitempty"`
+	ThemeConfig                 *ThemeConfig                 `json:"themeConfig,omitempty"`
+	ThemeUserConfig             *ThemeUserConfig             `json:"themeUserConfig,omitempty"`
+	ThemeConsoleConfig          *ThemeConsoleConfig          `json:"themeConsoleConfig,omitempty"`
+	DnsApi                      []DnsApi                     `json:"dnsApi,omitempty"`
+	Notification                *Notification                `json:"notification,omitempty"`
+	Tag                         []Tag                        `json:"tag,omitempty"`
+	Login                       *Login                       `json:"login,omitempty"`
+	ConsoleInstance             *ConsoleInstance             `json:"consoleInstance,omitempty"`
+	Menu                        *Menu                        `json:"menu,omitempty"`
+}
+
+type System struct {
+	WelcomeTourFinish bool `json:"welcomeTourFinish"`
+}
+
+type Menu struct {
+	List []string `json:"List"`
+}
+
+type UserSetting struct {
+	Username           string              `json:"username,omitempty"`
+	Password           string              `json:"password,omitempty"`
+	Salt               string              `json:"salt,omitempty"`
+	Email              string              `json:"email,omitempty"`
+	UserStatus         uint8               `json:"userStatus,omitempty"`
+	UserRemark         string              `json:"userRemark,omitempty"`
+	RegisterAt         *time.Time          `json:"registerAt,omitempty"`
+	PasskeyCredentials []PasskeyCredential `json:"passkeys,omitempty"`
+}
+
+type Passkey struct {
+	Enable    bool     `json:"enable"`
+	Name      string   `json:"name,omitempty"`
+	RPID      string   `json:"rpId,omitempty"`
+	Origins   []string `json:"origins,omitempty"`
+	AllowHTTP bool     `json:"allowHttp,omitempty"`
+}
+
+type PasskeyCredential struct {
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Credential webauthn.Credential `json:"credential"`
+	CreatedAt  int64               `json:"createdAt"`
+	LastUsedAt int64               `json:"lastUsedAt,omitempty"`
+}
+
+type ContainerCheckIgnoreUpgrade []string
+
+type ConsoleInstance struct {
+	Host      []string `json:"host"`
+	Container []string `json:"container"`
+}
+
+type DiskUsage struct {
+	DockerEnvName string           `json:"dockerEnvName"`
+	Docker        types.DiskUsage  `json:"docker"`
+	System        *SystemDiskUsage `json:"system,omitempty"`
+	UpdatedAt     time.Time        `json:"updatedAt,omitempty"`
+}
+
+type SystemDiskUsage struct {
+	Total          uint64  `json:"total"`
+	Used           uint64  `json:"used"`
+	Available      uint64  `json:"available"`
+	InodeTotal     *uint64 `json:"inodeTotal,omitempty"`
+	InodeUsed      *uint64 `json:"inodeUsed,omitempty"`
+	InodeAvailable *uint64 `json:"inodeAvailable,omitempty"`
+}
+
+type TwoFa struct {
+	Secret string `json:"secret,omitempty"`
+	Enable bool   `json:"enable,omitempty"`
+	Email  string `json:"email,omitempty"`
+	QrCode string `json:"qrCode,omitempty"`
+}
+
+type ThemeConfig map[string]any
+type ThemeConsoleConfig map[string]any
+
+type ThemeUserConfig struct {
+	Token         map[string]interface{} `json:"token"`
+	Components    map[string]interface{} `json:"components"`
+	BgImage       ThemeUserConfigBgImage `json:"bgImage,omitempty"`
+	SiteLink      []map[string]string    `json:"siteLink,omitempty"`
+	SiteCopyright string                 `json:"siteCopyright,omitempty"`
+	SiteTitle     string                 `json:"siteTitle"`
+	SiteLogo      string                 `json:"siteLogo,omitempty"`
+	LoginLogo     string                 `json:"loginLogo,omitempty"`
+	LoginBgImage  ThemeUserConfigBgImage `json:"loginBgImage,omitempty"`
+}
+
+type ThemeUserConfigBgImage struct {
+	Src    string `json:"src,omitempty"`
+	Width  string `json:"width,omitempty"`
+	Height string `json:"height,omitempty"`
+	Top    int    `json:"top,omitempty"`
+	Left   int    `json:"left,omitempty"`
+	Right  int    `json:"right,omitempty"`
+	Bottom int    `json:"bottom,omitempty"`
+}
+
+type DnsApi struct {
+	Title      string           `json:"title,omitempty"`
+	ServerName string           `json:"serverName,omitempty"`
+	Env        []types2.EnvItem `json:"env,omitempty"`
+}
+
+type TagItem struct {
+	Name        string `json:"name,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Url         string `json:"url,omitempty"`
+	Icon        string `json:"icon,omitempty"`
+}
+
+type Tag struct {
+	EnableShowGroup bool      `json:"enableShowGroup"`
+	Tag             string    `json:"tag,omitempty" binding:"required"` // 为分组显示时，tag 为分组标题
+	TagColor        string    `json:"tagColor,omitempty"`
+	Group           string    `json:"group"`
+	Item            []TagItem `json:"item,omitempty"`
+}
+
+type SystemEntrance struct {
+	Config   string  `json:"config"`             // system.entrance 默认值
+	Entrance *string `json:"entrance,omitempty"` // nil 表示使用 Config，非 nil 表示用户配置的入口
+	Enable   bool    `json:"enable"`             // 用户配置的启用状态；无持久化配置时根据 Config 初始化
+}
+
+type Login struct {
+	SystemEntrance      *SystemEntrance `json:"systemEntrance,omitempty"`
+	FailedEnable        bool            `json:"failedEnable,omitempty"`
+	FailedTotal         int             `json:"failedTotal,omitempty"`
+	FailedLockTime      int             `json:"failedLockTime,omitempty"`
+	NoPasswordEnable    bool            `json:"noPasswordEnable,omitempty"`
+	NoPasswordUrl       string          `json:"noPasswordUrl,omitempty"`
+	NoPasswordUserAgent string          `json:"noPasswordUserAgent,omitempty"`
+	NoPasswordIpList    []string        `json:"noPasswordIpList,omitempty"`
+	DefaultRedirect     string          `json:"defaultRedirect,omitempty"`
+}
+
+type NotificationEmailServer struct {
+	Host  string `json:"host,omitempty" binding:"required"`
+	Port  int    `json:"port,omitempty" binding:"required"`
+	Email string `json:"email,omitempty" binding:"required"`
+	Code  string `json:"code,omitempty" binding:"required"`
+}
+
+type Notification struct {
+	EmailServer *NotificationEmailServer `json:"emailServer,omitempty"`
+	Status      []string                 `json:"status,omitempty"`
+}

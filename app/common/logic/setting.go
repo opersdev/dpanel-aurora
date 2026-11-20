@@ -1,0 +1,355 @@
+package logic
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/docker/go-connections/nat"
+	"github.com/donknap/dpanel/common/accessor"
+	"github.com/donknap/dpanel/common/dao"
+	"github.com/donknap/dpanel/common/entity"
+	"github.com/donknap/dpanel/common/function"
+	"github.com/donknap/dpanel/common/service/docker/types"
+	"github.com/donknap/dpanel/common/service/storage"
+	types2 "github.com/donknap/dpanel/common/types"
+	"github.com/donknap/dpanel/common/types/define"
+	"github.com/patrickmn/go-cache"
+	"github.com/we7coreteam/w7-rangine-go/v2/pkg/support/facade"
+	"gorm.io/gorm"
+)
+
+// 全局配置
+var (
+	SettingGroupSetting                     = "setting"
+	SettingGroupSettingSystem               = "system"
+	SettingGroupSettingDocker               = "docker" // docker env
+	SettingGroupSettingTwoFa                = "twoFa"  // 双因素
+	SettingGroupSettingPasskey              = "passkey"
+	SettingGroupSettingDiskUsage            = "diskUsage"
+	SettingGroupSettingCheckContainerIgnore = "containerCheckIgnoreUpgrade"
+	SettingGroupSettingDPanelInfo           = "DPanelInfo"
+	SettingGroupSettingThemeConfig          = "themeConfig"
+	SettingGroupSettingThemeUserConfig      = "themeUserConfig"
+	SettingGroupSettingThemeConsoleConfig   = "themeConsoleConfig"
+	SettingGroupSettingDnsApi               = "dnsApi"
+	SettingGroupSettingTag                  = "tag"
+	SettingGroupSettingLogin                = "login"
+	SettingGroupSettingNotification         = "notification"
+	SettingGroupSettingConsoleInstance      = "consoleInstance"
+	SettingGroupSettingMenu                 = "menu"
+)
+
+// 用户相关数据
+var (
+	SettingGroupUser        = "user"
+	SettingGroupUserFounder = "founder"
+	SettingGroupUserManager = "manager"
+	SettingGroupUserMember  = "member"
+
+	SettingGroupUserStatusEnable  = uint8(2)
+	SettingGroupUserStatusDisable = uint8(1)
+)
+
+type Setting struct {
+}
+
+func (self Setting) Save(settingRow *entity.Setting) error {
+	oldSetting, _ := dao.Setting.Where(
+		dao.Setting.GroupName.Eq(settingRow.GroupName),
+		dao.Setting.Name.Eq(settingRow.Name),
+	).First()
+	if oldSetting == nil {
+		err := dao.Setting.Create(settingRow)
+		if err != nil {
+			return err
+		}
+	} else {
+		_, err := dao.Setting.Where(
+			dao.Setting.GroupName.Eq(settingRow.GroupName),
+			dao.Setting.Name.Eq(settingRow.Name),
+		).Updates(settingRow)
+		if err != nil {
+			return err
+		}
+	}
+	if settingRow.GroupName == SettingGroupSetting && settingRow.Value != nil {
+		storage.Cache.Set(fmt.Sprintf(storage.CacheKeySetting, settingRow.Name), settingRow.Value, cache.NoExpiration)
+	}
+	return nil
+}
+
+func (self Setting) GetValue(groupName string, name string) (*entity.Setting, error) {
+	setting, _ := dao.Setting.Where(
+		dao.Setting.GroupName.Eq(groupName),
+		dao.Setting.Name.Eq(name),
+	).First()
+	if setting == nil || setting.Value == nil {
+		return nil, fmt.Errorf("%s:%s setting not found", groupName, name)
+	}
+	return setting, nil
+
+}
+
+func (self Setting) GetSystem() (accessor.System, error) {
+	setting, err := dao.Setting.Where(
+		dao.Setting.GroupName.Eq(SettingGroupSetting),
+		dao.Setting.Name.Eq(SettingGroupSettingSystem),
+	).First()
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return accessor.System{}, nil
+	}
+	if err != nil {
+		return accessor.System{}, err
+	}
+	if setting.Value == nil || setting.Value.System == nil {
+		return accessor.System{}, fmt.Errorf("%s:%s setting value is empty", SettingGroupSetting, SettingGroupSettingSystem)
+	}
+	return *setting.Value.System, nil
+}
+
+// GetLoginSetting returns the persisted login settings together with the
+// effective security entrance configuration. Persisted settings keep the
+// user-controlled enable state; only missing settings derive it from Config.
+func (self Setting) GetLoginSetting() accessor.Login {
+	login := accessor.Login{}
+	if cached, ok := storage.LoadCache[*accessor.SettingValueOption](storage.CacheKeySettingLogin); ok && cached != nil && cached.Login != nil {
+		login = *cached.Login
+	} else {
+		self.GetByKey(SettingGroupSetting, SettingGroupSettingLogin, &login)
+	}
+
+	configured := strings.Trim(facade.GetConfig().GetString("system.entrance"), "/")
+	if login.SystemEntrance == nil {
+		login.SystemEntrance = &accessor.SystemEntrance{
+			Config: configured,
+			Enable: configured != "",
+		}
+		return login
+	}
+
+	var entrance *string
+	if login.SystemEntrance.Entrance != nil {
+		normalized := strings.Trim(*login.SystemEntrance.Entrance, "/")
+		entrance = &normalized
+	}
+	login.SystemEntrance = &accessor.SystemEntrance{
+		Config:   configured,
+		Entrance: entrance,
+		Enable:   login.SystemEntrance.Enable,
+	}
+	return login
+}
+
+func (self Setting) GetValueById(id int32) (*entity.Setting, error) {
+	setting, _ := dao.Setting.Where(dao.Setting.ID.Eq(id)).First()
+	if setting == nil {
+		return nil, function.ErrorMessage(define.ErrorMessageCommonDataNotFoundOrDeleted)
+	}
+	return setting, nil
+}
+
+func (self Setting) GetDPanelInfo() types2.DPanelInfo {
+	result := types2.DPanelInfo{}
+	self.GetByKey(SettingGroupSetting, SettingGroupSettingDPanelInfo, &result)
+	runInDocker := function.IsRunInDocker()
+	if runInDocker {
+		result.RunIn = types2.DPanelRunInContainer
+	} else {
+		result.RunIn = types2.DPanelRunInHost
+	}
+	existingName := result.Name
+	if !runInDocker {
+		if executablePath, err := os.Executable(); err == nil {
+			executableName := strings.TrimSpace(filepath.Base(executablePath))
+			if executableName != "" && executableName != "." && executableName != string(filepath.Separator) {
+				result.Name = executableName
+			}
+		}
+	}
+	if result.Name == "" {
+		result.Name = existingName
+	}
+	if result.Name == "" {
+		result.Name = strings.TrimSpace(facade.GetConfig().GetString("app.name"))
+	}
+	result.Version = facade.GetConfig().GetString("app.version")
+	result.Release = facade.GetConfig().GetString("app.release")
+	result.Family = facade.GetConfig().GetString("app.family")
+	result.Env = facade.GetConfig().GetString("app.env")
+	result.BaseURL = facade.GetConfig().GetString("system.baseurl")
+	result.ServerHost = facade.GetConfig().GetString("server.http.host")
+	result.ServerPort = facade.GetConfig().GetInt("server.http.port")
+	result.LogConsoleLevel = facade.GetConfig().GetString("log.console.level")
+	result.LogFileLevel = facade.GetConfig().GetString("log.file.level")
+	result.StorageLocalPath = facade.GetConfig().GetString("system.storage.local.path")
+
+	if result.Dns == "" {
+		result.Dns = os.Getenv("DP_DNS")
+	}
+	if result.Proxy == "" {
+		if v := os.Getenv("HTTP_PROXY"); v != "" {
+			result.Proxy = v
+		} else {
+			result.Proxy = os.Getenv("HTTPS_PROXY")
+		}
+	}
+	if result.NoProxy == "" {
+		result.NoProxy = os.Getenv("NO_PROXY")
+	}
+
+	if len(result.Version) == len(define.DateShowVersion) && strings.Count(result.Version, ".") == 1 {
+		if result.Release == "" {
+			result.Release = result.Version
+		}
+		result.Version = "beta"
+	}
+	result.IsDev = result.Version == "beta"
+	result.BaseImage = ""
+	result.PublicPort = 0
+	if result.RunIn == types2.DPanelRunInHost {
+		result.BaseImage = strings.TrimSpace(os.Getenv("INSTALLER_BASE_IMAGE"))
+		if dev, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("APP_DEV"))); err == nil {
+			result.IsDev = dev
+		}
+	} else if result.ContainerInfo.ContainerJSONBase != nil && result.ContainerInfo.Config != nil {
+		for _, line := range result.ContainerInfo.Config.Env {
+			if value, ok := strings.CutPrefix(line, "INSTALLER_BASE_IMAGE="); ok && value != "" {
+				result.BaseImage = value
+			}
+			if value, ok := strings.CutPrefix(line, "APP_DEV="); ok {
+				if dev, err := strconv.ParseBool(value); err == nil {
+					result.IsDev = dev
+				}
+			}
+		}
+		if result.BaseImage == "" && strings.HasSuffix(result.ContainerInfo.Config.Image, "-debian") {
+			result.BaseImage = "debian"
+		}
+	}
+	if result.ServerPort > 0 {
+		if result.RunIn == types2.DPanelRunInHost {
+			result.PublicPort = result.ServerPort
+		} else if result.ContainerInfo.ContainerJSONBase != nil && result.ContainerInfo.HostConfig != nil {
+			if string(result.ContainerInfo.HostConfig.NetworkMode) == "host" {
+				result.PublicPort = result.ServerPort
+			} else {
+				port := nat.Port(strconv.Itoa(result.ServerPort) + "/tcp")
+				for _, binding := range result.ContainerInfo.HostConfig.PortBindings[port] {
+					publicPort, err := strconv.Atoi(binding.HostPort)
+					if err == nil && publicPort > 0 && publicPort <= 65535 {
+						result.PublicPort = publicPort
+						break
+					}
+				}
+			}
+		}
+	}
+
+	result.IsCe = result.Family != "pe"
+	result.IsLite = result.Env == "lite"
+	return result
+}
+
+func (self Setting) Delete(groupName string, name string) error {
+	_, _ = dao.Setting.Where(
+		dao.Setting.GroupName.Eq(groupName),
+		dao.Setting.Name.Eq(name),
+	).Delete()
+	if groupName == SettingGroupSetting {
+		storage.Cache.Delete(fmt.Sprintf(storage.CacheKeySetting, name))
+	}
+	return nil
+}
+
+func (self Setting) GetByKey(group, name string, value interface{}) (exists bool) {
+	setting, err := self.GetValue(group, name)
+	if err != nil {
+		return false
+	}
+	if value != nil {
+		switch v := value.(type) {
+		case *map[string]*types.DockerEnv:
+			if setting.Value.Docker != nil {
+				exists = true
+				*v = setting.Value.Docker
+			}
+		case *accessor.DiskUsage:
+			if setting.Value.DiskUsage != nil {
+				exists = true
+				*v = *setting.Value.DiskUsage
+			}
+		case *accessor.TwoFa:
+			if setting.Value.TwoFa != nil {
+				exists = true
+				*v = *setting.Value.TwoFa
+			}
+		case *accessor.Passkey:
+			if setting.Value.Passkey != nil {
+				exists = true
+				*v = *setting.Value.Passkey
+			}
+		case *accessor.ContainerCheckIgnoreUpgrade:
+			if setting.Value.ContainerCheckIgnoreUpgrade != nil {
+				exists = true
+				*v = setting.Value.ContainerCheckIgnoreUpgrade
+			}
+		case *types2.DPanelInfo:
+			if setting.Value.DPanelInfo != nil {
+				exists = true
+				*v = *setting.Value.DPanelInfo
+			}
+		case *accessor.ThemeConfig:
+			if setting.Value.ThemeConfig != nil {
+				exists = true
+				*v = *setting.Value.ThemeConfig
+			}
+		case *accessor.ThemeConsoleConfig:
+			if setting.Value.ThemeConfig != nil {
+				exists = true
+				*v = *setting.Value.ThemeConsoleConfig
+			}
+		case *accessor.ThemeUserConfig:
+			if setting.Value.ThemeUserConfig != nil {
+				exists = true
+				*v = *setting.Value.ThemeUserConfig
+			}
+		case *[]accessor.DnsApi:
+			if setting.Value.DnsApi != nil {
+				exists = true
+				*v = setting.Value.DnsApi
+			}
+		case *accessor.Notification:
+			if setting.Value.Notification != nil {
+				exists = true
+				*v = *setting.Value.Notification
+			}
+		case *[]accessor.Tag:
+			if setting.Value.Tag != nil {
+				exists = true
+				*v = setting.Value.Tag
+			}
+		case *accessor.Login:
+			if setting.Value.Login != nil {
+				exists = true
+				*v = *setting.Value.Login
+			}
+		case *accessor.ConsoleInstance:
+			if setting.Value.ConsoleInstance != nil {
+				exists = true
+				*v = *setting.Value.ConsoleInstance
+			}
+		case *accessor.Menu:
+			if setting.Value.Menu != nil {
+				exists = true
+				*v = *setting.Value.Menu
+			}
+		case *entity.Setting:
+			*v = *setting
+		}
+	}
+	return exists
+}

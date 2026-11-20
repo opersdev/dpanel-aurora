@@ -1,0 +1,221 @@
+package task
+
+import (
+	"log/slog"
+
+	"github.com/containerd/errdefs"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/network"
+	"github.com/donknap/dpanel/common/function"
+	"github.com/donknap/dpanel/common/service/docker"
+	builder "github.com/donknap/dpanel/common/service/docker/container"
+	"github.com/donknap/dpanel/common/service/docker/types"
+	containerexec "github.com/donknap/dpanel/common/service/exec/container"
+	"github.com/donknap/dpanel/common/service/notice"
+)
+
+func (self Docker) ContainerCreate(task *CreateContainerOption) (containerID string, err error) {
+	var containerOwnerNetwork string
+
+	// 如果绑定了 ipv6 需要先创建一个 ipv6 的自身网络
+	// 如果容器配置了 Ip，需要先创建一个自身网络
+	// 如果容器关联了其它容器，需要先创建一个自身网络
+	if task.BuildParams.BindIpV6 ||
+		!function.IsEmptyArray(task.BuildParams.Links) ||
+		task.BuildParams.IpV4 != nil || task.BuildParams.IpV6 != nil {
+		// 删除掉的网络
+		err = docker.Sdk.NetworkRemove(docker.Sdk.Ctx, task.SiteName)
+		if err != nil {
+			return "", err
+		}
+		if task.BuildParams.BindIpV6 && task.BuildParams.IpV6 == nil {
+			task.BuildParams.IpV6 = &types.NetworkCreateItem{}
+		}
+		containerOwnerNetwork, err = docker.Sdk.NetworkCreate(docker.Sdk.Ctx, task.SiteName, task.BuildParams.IpV4, task.BuildParams.IpV6)
+		if err != nil {
+			return "", err
+		}
+	}
+	inspectInfo := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{},
+	}
+	if task.ContainerId != "" {
+		inspectInfo, err = docker.Sdk.Client.ContainerInspect(docker.Sdk.Ctx, task.ContainerId)
+		if err != nil && !errdefs.IsNotFound(err) {
+			return "", err
+		}
+	}
+
+	hasExistingContainer := inspectInfo.ID != ""
+	if hasExistingContainer {
+		shortContainerID := inspectInfo.ID
+		if len(shortContainerID) > 11 {
+			shortContainerID = shortContainerID[:11]
+		}
+		_ = notice.Message{}.Info(".containerRemove", shortContainerID)
+	}
+
+	wasRunning := hasExistingContainer && inspectInfo.State != nil && inspectInfo.State.Running
+
+	options := []builder.Option{
+		builder.WithContainerName(task.SiteName),
+	}
+	if hasExistingContainer {
+		options = append(options,
+			builder.WithContainerRollback(inspectInfo, false),
+			builder.WithContainerInfo(inspectInfo),
+		)
+	}
+
+	options = append(options, []builder.Option{
+		builder.WithHostname(task.SiteName),
+		builder.WithNetworkMode(network.NetworkDefault),
+		builder.WithPid(""),
+		builder.WithExtraHosts(types.ValueItem{
+			Name:  "host.dpanel.local",
+			Value: "host-gateway",
+		}),
+		builder.WithStdioKeepAlive(true),
+		builder.WithHostname(task.BuildParams.Hostname),
+		builder.WithImage(task.ImageName),
+		builder.WithEnv(task.BuildParams.Environment...),
+		builder.WithVolumesFrom(task.BuildParams.Links...),
+		builder.WithPort(task.BuildParams.Ports...),
+		builder.WithPublishAllPorts(task.BuildParams.PublishAllPorts),
+		builder.WithVolume(task.BuildParams.Volumes...),
+		builder.WithTmpfs(task.BuildParams.Tmpfs...),
+		builder.WithPrivileged(task.BuildParams.Privileged),
+		builder.WithSecurityOpt(task.BuildParams.SecurityOpt...),
+		builder.WithRuntime(task.BuildParams.Runtime),
+		builder.WithReadonlyRootfs(task.BuildParams.ReadonlyRootfs),
+		builder.WithSysctls(task.BuildParams.Sysctls),
+		builder.WithAutoRemove(task.BuildParams.AutoRemove),
+		builder.WithRestartPolicy(task.BuildParams.RestartPolicy),
+		builder.WithCpus(task.BuildParams.Cpus),
+		builder.WithMemory(task.BuildParams.Memory),
+		builder.WithMemorySwap(task.BuildParams.MemorySwap),
+		builder.WithShmSize(task.BuildParams.ShmSize),
+		builder.WithWorkDir(task.BuildParams.WorkDir),
+		builder.WithUser(task.BuildParams.User),
+		builder.WithCommandStr(task.BuildParams.Command),
+		builder.WithEntrypointStr(task.BuildParams.Entrypoint),
+		builder.WithLog(task.BuildParams.Log),
+		builder.WithDns(task.BuildParams.Dns),
+		builder.WithLabel(task.BuildParams.Label...),
+		builder.WithImageDigest(),
+		builder.WithExtraHosts(task.BuildParams.ExtraHosts...),
+		builder.WithDevice(task.BuildParams.Device...),
+		builder.WithGpus(task.BuildParams.Gpus),
+		builder.WithHealthcheck(task.BuildParams.Healthcheck),
+		builder.WithCap(task.BuildParams.CapAdd...),
+		builder.WithGroupAdd(task.BuildParams.GroupAdd...),
+		builder.WithInit(task.BuildParams.Init),
+	}...)
+	if task.BuildParams.HostPid {
+		options = append(options, builder.WithHostPid())
+	}
+	if task.BuildParams.UseHostNetwork {
+		options = append(options, builder.WithHostNetwork())
+	}
+
+	useBridgeNetwork := function.InArrayWalk(task.BuildParams.Network, func(i types.NetworkItem) bool {
+		if i.Name == network.NetworkBridge {
+			return true
+		}
+		return false
+	})
+	// 如果没有开启加入 bridge 网络，在创建时添加网络参数，否则只能在创建之后再加入网络
+	// 如果一开始加入网络，会覆盖掉 bridge 网络
+	if !useBridgeNetwork && !function.IsEmptyArray(task.BuildParams.Network) {
+		options = append(options, builder.WithNetwork(task.BuildParams.Network...))
+	}
+
+	b, err := builder.New(docker.Sdk, options...)
+	if err != nil {
+		return inspectInfo.ID, err
+	}
+
+	// 创建参数校验完成后再停止旧容器，避免参数错误导致旧容器提前停止。
+	// rollback 中的停止是事务正常流程，不能替代这里单独记录耗时操作的执行进度。
+	if wasRunning {
+		if err = docker.Sdk.Client.ContainerStop(docker.Sdk.Ctx, inspectInfo.ID, container.StopOptions{}); err != nil {
+			return "", err
+		}
+	}
+	_ = notice.Message{}.Info(".containerCreate", task.SiteName)
+	containerID, err = b.Execute()
+	if err != nil {
+		return containerID, err
+	}
+	// 当前如果新建了容器自身网络，创建完后加入
+	// 如果在创建时加入，则会丢失 bridge 网络
+	if containerOwnerNetwork != "" {
+		o := types.NetworkItem{
+			Name: containerOwnerNetwork,
+		}
+		if task.BuildParams.IpV6 != nil {
+			o.IpV6 = task.BuildParams.IpV6.Address
+		}
+		if task.BuildParams.IpV4 != nil {
+			o.IpV4 = task.BuildParams.IpV4.Address
+		}
+		err = docker.Sdk.NetworkConnect(docker.Sdk.Ctx, o, task.SiteName)
+		if err != nil {
+			return containerID, err
+		}
+	}
+
+	// 利用Network关联容器
+	// 每次创建自身网络时，先删除掉，最后再统一将关联和自身加入进来
+	// 容器关联时必须采用 hostname 以保证容器可以访问
+	if !function.IsEmptyArray(task.BuildParams.Links) {
+		for _, value := range task.BuildParams.Links {
+			if value.Alise == "" {
+				value.Alise = value.Name
+			}
+			err = docker.Sdk.NetworkConnect(docker.Sdk.Ctx, types.NetworkItem{
+				Name: containerOwnerNetwork,
+				Alise: []string{
+					value.Alise,
+				},
+			}, value.Name)
+			if err != nil {
+				return containerID, err
+			}
+		}
+	}
+
+	// 网络需要在创建好容器后统一 connect 否则 bridge 网络会消失。当网络变更后了，可能绑定的端口无法使用。
+	// 如果同时绑定多个网络，会以自定义的网络优先，默认的 bridge 网络将不会绑定
+	if useBridgeNetwork && !function.IsEmptyArray(task.BuildParams.Network) {
+		for _, value := range task.BuildParams.Network {
+			if function.InArray([]string{
+				network.NetworkDefault,
+				network.NetworkHost,
+				network.NetworkNone,
+				network.NetworkBridge,
+				network.NetworkNat,
+			}, value.Name) {
+				continue
+			}
+			err = docker.Sdk.NetworkConnect(docker.Sdk.Ctx, value, task.SiteName)
+			if err != nil {
+				return containerID, err
+			}
+		}
+	}
+
+	if !task.BuildParams.NoStart {
+		err = docker.Sdk.Client.ContainerStart(docker.Sdk.Ctx, containerID, container.StartOptions{})
+		if err != nil {
+			return containerID, err
+		}
+		if task.BuildParams.Hook != nil && task.BuildParams.Hook.ContainerCreate != "" {
+			_, err := containerexec.QuickRun(docker.Sdk.Ctx, docker.Sdk.Client, containerID, "/bin/sh", "-c", task.BuildParams.Hook.ContainerCreate)
+			if err != nil {
+				slog.Debug("container create run hook", "hook", "container create", "error", err.Error())
+			}
+		}
+	}
+	return containerID, err
+}

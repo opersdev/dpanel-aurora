@@ -1,0 +1,5 @@
+.git
+.run
+bin
+runtime
+!runtime/dpanel-*-darwin-*

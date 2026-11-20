@@ -1,0 +1,140 @@
+ARG PE_LITE_FROM_BASE=dpanel/dpanel:lite
+ARG PE_PROD_FROM_BASE=dpanel/dpanel:latest
+
+ARG LIBC=musl
+ARG VERSION=12.3
+ARG TARGETARCH
+
+FROM --platform=${BUILDPLATFORM} dpanel/builder:${TARGETARCH}-${LIBC}-${VERSION} AS toolchain
+FROM --platform=$BUILDPLATFORM alpine AS source
+
+ARG HTTP_PROXY
+
+RUN export HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTP_PROXY} && \
+    apk add --no-cache git github-cli
+
+WORKDIR /src
+COPY . .
+
+ARG REPO_BRANCH
+ARG REPO_PULL
+ENV REPO_BRANCH=${REPO_BRANCH:-master}
+ENV REPO_PULL=${REPO_PULL:-false}
+
+RUN --mount=type=secret,id=GIT_TOKEN \
+    if [ "$REPO_PULL" = "true" ] || [ "$REPO_PULL" = "1" ]; then \
+        echo ">> REPO_PULL enabled. Clearing local files and pulling from remote [Branch/Tag: ${REPO_BRANCH}]..." && \
+        rm -rf ./* ./.[!.]* 2>/dev/null || true && \
+        export GH_TOKEN=$(cat /run/secrets/GIT_TOKEN) && \
+        gh repo clone donknap/dpanel . -- -b ${REPO_BRANCH} --depth 1 && \
+        rm -rf ./app/pro && \
+        gh repo clone donknap/dpanel-pro ./app/pro -- -b ${REPO_BRANCH} --depth 1; \
+    else \
+        echo ">> REPO_PULL disabled. Using local source code..." ; \
+    fi
+
+FROM --platform=${BUILDPLATFORM} golang:1.25-bookworm AS builder
+
+ARG HTTP_PROXY
+
+RUN export HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTP_PROXY} && \
+    apt-get update && apt-get install -y --no-install-recommends git && \
+    go install mvdan.cc/garble@v0.15.0
+
+WORKDIR /src
+
+COPY --from=source /src/go.mod /src/go.sum ./
+COPY --from=source /src/app/agent/go.mod /src/app/agent/go.sum ./app/agent/
+RUN --mount=type=cache,target=/go/pkg/mod,id=dpanel_mod_cache \
+    export HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTP_PROXY} && \
+    go mod download
+
+COPY --from=source /src /src
+
+ARG TARGETARCH
+ARG APP_VERSION
+ARG APP_RELEASE
+ARG APP_FAMILY
+ENV APP_VERSION=${APP_VERSION}
+
+RUN --mount=type=secret,id=GARBLE_SEED \
+    --mount=type=cache,target=/root/.cache/go-build,id=dpanel_go_build_${TARGETARCH} \
+    --mount=type=cache,target=/go/pkg/mod,id=dpanel_mod_cache_${TARGETARCH} \
+    --mount=type=bind,from=toolchain,source=/toolchains,target=/toolchains \
+    export SEED=$(cat /run/secrets/GARBLE_SEED) && \
+    export HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTP_PROXY} && \
+    go test -v --run TestGenerateDefines ./app/pro/tests/obfuscate_test.go && \
+    COMMON_ARGS="APP_VERSION=${APP_VERSION} APP_RELEASE=${APP_RELEASE} APP_FAMILY=${APP_FAMILY-pe} OS=linux GARBLE=1 GARBLE_SEED=${SEED}" && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+        export CC=$(echo /toolchains/*amd64-musl-*/bin/*-gcc); \
+        make build ${COMMON_ARGS} AMD64=1 ARM64=0 ARMV7=0 CC_AMD64=$CC; \
+    elif [ "$TARGETARCH" = "arm64" ]; then \
+        export CC=$(echo /toolchains/*arm64-musl-*/bin/*-gcc); \
+        make build ${COMMON_ARGS} AMD64=0 ARM64=1 ARMV7=0 CC_ARM64=$CC; \
+    elif [ "$TARGETARCH" = "arm" ]; then \
+        export CC=$(echo /toolchains/*arm-musl-*/bin/*-gcc); \
+        make build ${COMMON_ARGS} AMD64=0 ARM64=0 ARMV7=1 CC_ARMV7=$CC; \
+    fi
+
+FROM scratch AS binary-export
+COPY --from=builder /src/runtime /
+
+FROM --platform=${BUILDPLATFORM} golang:1.25-bookworm AS reverse
+
+ARG HTTP_PROXY
+
+RUN export HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTP_PROXY} && \
+    apt-get update && apt-get install -y --no-install-recommends git && \
+    go install mvdan.cc/garble@v0.15.0
+
+WORKDIR /src
+
+COPY --from=source /src/go.mod /src/go.sum ./
+COPY --from=source /src/app/agent/go.mod /src/app/agent/go.sum ./app/agent/
+RUN --mount=type=cache,target=/go/pkg/mod,id=dpanel_mod_cache \
+    export HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTP_PROXY} && \
+    go mod download
+
+COPY --from=source /src /src
+
+ARG LOG_PATH
+ARG TARGETARCH
+ARG APP_VERSION
+ARG APP_FAMILY
+ENV APP_VERSION=${APP_VERSION}
+
+COPY ${LOG_PATH} /tmp/run.log
+
+RUN --mount=type=secret,id=GARBLE_SEED \
+    --mount=type=cache,target=/root/.cache/go-build,id=dpanel_go_build_${TARGETARCH} \
+    --mount=type=cache,target=/go/pkg/mod,id=dpanel_mod_cache_${TARGETARCH} \
+    export SEED=$(cat /run/secrets/GARBLE_SEED) && \
+    mkdir -p /src/runtime && \
+    GOGARBLE="*" garble -seed="$SEED" reverse \
+    -tags "${APP_FAMILY-pe},w7_rangine_release,containers_image_openpgp" \
+    /src/*.go < /tmp/run.log > /src/runtime/reversed.log
+
+FROM scratch AS reverse-export
+COPY --from=reverse /src/runtime/reversed.log /
+
+FROM $PE_LITE_FROM_BASE AS lite
+
+ARG TARGETARCH
+ARG APP_VERSION
+ARG APP_FAMILY
+
+ENV APP_VERSION=$APP_VERSION
+ENV APP_FAMILY=$APP_FAMILY
+
+COPY --from=builder /src/runtime/dpanel${APP_FAMILY:+"-${APP_FAMILY}"}-musl-${TARGETARCH} /app/server/dpanel
+
+FROM $PE_PROD_FROM_BASE AS production
+
+ARG TARGETARCH
+ARG APP_VERSION
+ARG APP_FAMILY
+
+ENV APP_VERSION=$APP_VERSION
+ENV APP_FAMILY=$APP_FAMILY
+
+COPY --from=builder /src/runtime/dpanel${APP_FAMILY:+"-${APP_FAMILY}"}-musl-${TARGETARCH} /app/server/dpanel

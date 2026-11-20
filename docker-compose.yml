@@ -1,0 +1,13 @@
+services:
+  dpanel:
+    image: ghcr.io/opersdev/dpanel-aurora:latest
+    container_name: dpanel-aurora
+    restart: unless-stopped
+    ports:
+      - "8808:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dpanel-data:/dpanel
+
+volumes:
+  dpanel-data:

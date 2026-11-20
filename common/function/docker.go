@@ -1,0 +1,168 @@
+package function
+
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"runtime"
+	"strings"
+
+	"github.com/distribution/reference"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/pkg/stdcopy"
+	dockerregistry "github.com/docker/docker/registry"
+	"github.com/mattn/go-shellwords"
+)
+
+func SplitCommandArray(cmd string) []string {
+	result := make([]string, 0)
+	if runtime.GOOS == "windows" {
+		// windows 中需要将路径再次转义一下，防止 parade 之后没有分隔符
+		cmd = strings.ReplaceAll(cmd, "\\", "\\\\")
+	}
+	result, err := shellwords.Parse(cmd)
+	if err != nil {
+		slog.Debug("function split command array", "error", err)
+	}
+	result = PluckArrayWalk(result, func(item string) (string, bool) {
+		if item == "\n" || item == "\r\n" {
+			return "", false
+		}
+		return item, true
+	})
+	return result
+}
+
+func DockerCombinedStream(rawStream io.ReadCloser) io.ReadCloser {
+	pr, pw := io.Pipe()
+	go func() {
+		defer rawStream.Close()
+		_, err := stdcopy.StdCopy(pw, pw, rawStream)
+		pw.CloseWithError(err)
+	}()
+	return pr
+}
+
+func ParseRestartPolicy(restartType string) (mode container.RestartPolicyMode) {
+	restartPolicyMap := map[string]container.RestartPolicyMode{
+		"always":         container.RestartPolicyAlways,
+		"no":             container.RestartPolicyDisabled,
+		"unless-stopped": container.RestartPolicyUnlessStopped,
+		"on-failure":     container.RestartPolicyOnFailure,
+	}
+	if mode, ok := restartPolicyMap[restartType]; ok {
+		return mode
+	} else {
+		return container.RestartPolicyDisabled
+	}
+}
+
+func DefaultCapabilities() []string {
+	return []string{
+		"CAP_CHOWN",
+		"CAP_DAC_OVERRIDE",
+		"CAP_FSETID",
+		"CAP_FOWNER",
+		"CAP_MKNOD",
+		"CAP_NET_RAW",
+		"CAP_SETGID",
+		"CAP_SETUID",
+		"CAP_SETFCAP",
+		"CAP_SETPCAP",
+		"CAP_NET_BIND_SERVICE",
+		"CAP_SYS_CHROOT",
+		"CAP_KILL",
+		"CAP_AUDIT_WRITE",
+	}
+}
+
+// IsDockerObjectID 判断值是否为完整或默认短格式的 Docker 对象 ID。
+func IsDockerObjectID(value string) bool {
+	if len(value) != 12 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// Tag {registry}/{{namespace-可能有多个路径}/{imageName}basename}:{version}
+type Tag struct {
+	Name      string `json:"name"`
+	Registry  string `json:"registry"`
+	Namespace string `json:"namespace"`
+	ImageName string `json:"imageName"`
+	Version   string `json:"version"`
+	BaseName  string `json:"baseName"`
+}
+
+func (self Tag) Uri() string {
+	if self.Registry == "" {
+		self.Registry = dockerregistry.DefaultNamespace
+	}
+	self.Registry = strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(self.Registry, "http://"), "https://"), "/")
+	split := ":"
+	if self.Namespace == "" {
+		return fmt.Sprintf("%s/%s%s%s", self.Registry, self.ImageName, split, self.Version)
+	} else {
+		return fmt.Sprintf("%s/%s/%s%s%s", self.Registry, self.Namespace, self.ImageName, split, self.Version)
+	}
+}
+
+func (self Tag) getName() string {
+	version := self.Version
+	if strings.Contains(self.Version, "@") {
+		version = strings.Split(version, "@")[0]
+	}
+	if self.Namespace == "" {
+		return fmt.Sprintf("%s:%s", self.ImageName, version)
+	} else {
+		return fmt.Sprintf("%s/%s:%s", self.Namespace, self.ImageName, version)
+	}
+}
+
+func ImageTag(tag string) *Tag {
+	tag = strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(tag, "/"), "http://"), "https://")
+	result := &Tag{}
+
+	ref, err := reference.ParseNormalizedNamed(tag)
+	if err != nil {
+		return result
+	}
+	result.Registry = reference.Domain(ref)
+	result.BaseName = reference.Path(ref)
+
+	// .String() docker.io/test/phpmyadmin:latest@sha256
+	tagName := reference.TagNameOnly(ref)
+	if i := strings.LastIndex(tagName.String(), result.BaseName); i > -1 {
+		result.Version = tagName.String()[i+len(result.BaseName)+1:]
+	}
+
+	// 假如 basename 包含 / 再进一步的分割 namespace 和 imageName
+	if i := strings.LastIndex(result.BaseName, "/"); i > -1 {
+		result.Namespace = result.BaseName[:i]
+		result.ImageName = result.BaseName[i+1:]
+	} else {
+		result.ImageName = result.BaseName
+	}
+	// 如果当前是 docker.io 没有 namespace 时默认添加上 library
+	if result.Registry == "docker.io" && result.Namespace == "" {
+		result.Namespace = "library"
+	}
+	result.Name = result.getName()
+	return result
+}
+
+func IsRunInDocker() bool {
+	if v := os.Getenv("DP_RUN_IN_CONTAINER"); v == "1" {
+		return true
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	return false
+}

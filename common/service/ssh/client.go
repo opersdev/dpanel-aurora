@@ -1,0 +1,185 @@
+package ssh
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net"
+	"time"
+
+	"github.com/pkg/sftp"
+	"golang.org/x/crypto/ssh"
+)
+
+func NewClient(opt ...Option) (client *Client, err error) {
+	c := &Client{
+		sshClientConfig: &ssh.ClientConfig{
+			Timeout: time.Second * 5,
+		},
+	}
+	knownHostsCallback := NewDefaultKnownHostCallback()
+	c.sshClientConfig.HostKeyCallback = knownHostsCallback.Handler
+
+	for _, option := range opt {
+		err := option(c)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if c.ctx == nil {
+		c.ctx, c.ctxCancel = context.WithCancel(context.Background())
+	} else {
+		c.ctx, c.ctxCancel = context.WithCancel(c.ctx)
+	}
+	defer func() {
+		if err != nil {
+			c.Close()
+		}
+	}()
+
+	connectCtx := c.ctx
+	if c.connectCtx != nil {
+		connectCtx = c.connectCtx
+	}
+	if c.sshClientConfig.Timeout > 0 {
+		var connectCancel context.CancelFunc
+		connectCtx, connectCancel = context.WithTimeout(connectCtx, c.sshClientConfig.Timeout)
+		defer connectCancel()
+	}
+
+	dialContext := c.dial
+	if dialContext == nil {
+		dialContext = (&net.Dialer{}).DialContext
+	}
+	conn, err := dialContext(connectCtx, c.protocol, c.address)
+	if err != nil {
+		if connectCtx.Err() != nil {
+			err = connectCtx.Err()
+		}
+		return nil, err
+	}
+	connectDone := make(chan struct{})
+	stopConnect := context.AfterFunc(connectCtx, func() {
+		defer close(connectDone)
+		_ = conn.Close()
+	})
+	defer func() {
+		// 返回前停止并等待取消处理，避免释放建连上下文时关闭已建立的连接。
+		if !stopConnect() {
+			<-connectDone
+		}
+		if err == nil && connectCtx.Err() != nil {
+			client, err = nil, connectCtx.Err()
+		}
+	}()
+
+	sshConn, channels, requests, err := ssh.NewClientConn(conn, c.address, c.sshClientConfig)
+	if err != nil {
+		_ = conn.Close()
+		if connectCtx.Err() != nil {
+			err = connectCtx.Err()
+		}
+		return nil, err
+	}
+	c.Conn = ssh.NewClient(sshConn, channels, requests)
+
+	if c.needSftp {
+		c.SftpConn, err = c.NewSftpSession()
+		if err != nil {
+			c.Close()
+			if connectCtx.Err() != nil {
+				err = connectCtx.Err()
+			}
+			return nil, err
+		}
+	}
+
+	go func() {
+		<-c.ctx.Done()
+		c.Close()
+	}()
+
+	return c, nil
+}
+
+// NewSession ssh 限制一个连接默认只能有 10 个会话
+func (self *Client) NewSession() (*ssh.Session, error) {
+	return self.Conn.NewSession()
+}
+
+func (self *Client) NewPtySession(height, width int) (session *ssh.Session, read io.Reader, write io.WriteCloser, err error) {
+	go func() {
+		select {
+		case <-self.ctx.Done():
+			if write != nil {
+				_ = write.Close()
+			}
+			if session != nil {
+				_ = session.Close()
+				_ = session.Signal(ssh.SIGINT)
+			}
+		}
+	}()
+
+	session, err = self.NewSession()
+	if err != nil {
+		return session, nil, nil, err
+	}
+	if err = session.RequestPty("xterm", height, width, ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}); err != nil {
+		return session, nil, nil, err
+	}
+	write, err = session.StdinPipe()
+	if err != nil {
+		return session, nil, nil, err
+	}
+	read, err = session.StdoutPipe()
+	if err != nil {
+		return session, nil, nil, err
+	}
+	if stderr, err1 := session.StderrPipe(); err1 == nil {
+		read = io.MultiReader(read, stderr)
+	}
+	if err = session.Shell(); err != nil {
+		return session, nil, nil, err
+	}
+	return session, read, write, nil
+}
+
+func (self *Client) NewSftpSession() (*sftp.Client, error) {
+	sftpClient, err := sftp.NewClient(self.Conn)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		<-self.ctx.Done()
+		_ = sftpClient.Close()
+	}()
+	return sftpClient, nil
+}
+
+func (self *Client) Close() {
+	self.closeOnce.Do(func() {
+		if self.ctxCancel != nil {
+			self.ctxCancel()
+		}
+		if self.SftpConn != nil {
+			if err := self.SftpConn.Close(); err != nil {
+				slog.Debug("ssh sftp close", "error", err)
+			}
+		}
+		if self.Conn != nil {
+			if err := self.Conn.Close(); err != nil {
+				slog.Debug("ssh client close", "error", err)
+			}
+		}
+	})
+}
+
+func (self *Client) Ctx() context.Context {
+	return self.ctx
+}

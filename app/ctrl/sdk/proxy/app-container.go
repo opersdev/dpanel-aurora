@@ -1,0 +1,51 @@
+package proxy
+
+import (
+	"encoding/json"
+
+	"github.com/donknap/dpanel/app/ctrl/sdk/types/app"
+	"github.com/donknap/dpanel/common/function"
+	"github.com/donknap/dpanel/common/types/define"
+	"github.com/gin-gonic/gin"
+)
+
+func (self *Client) AppContainerGetDetail(containerName string) (result app.ContainerDetailResult, err error) {
+	data, err := self.Post(function.RouterApiUri("/app/container/get-detail"), gin.H{
+		"md5": containerName,
+	})
+	if err != nil {
+		return result, err
+	}
+	err = json.NewDecoder(data).Decode(&result)
+	if err == nil && result.Info.ContainerJSONBase == nil {
+		err = function.ErrorMessage(define.ErrorMessageCommonDataNotFoundOrDeleted)
+	}
+	return result, err
+}
+
+func (self *Client) AppContainerUpgrade(params *app.ContainerUpgradeOption) (result app.ContainerUpgradeResult, err error) {
+	data, err := self.Post(function.RouterApiUri("/app/container-upgrade/upgrade"), params)
+	if err != nil {
+		return result, err
+	}
+	err = json.NewDecoder(data).Decode(&result)
+	return result, err
+}
+
+func (self *Client) AppContainerCheckUpgrade(params *app.ContainerCheckUpgradeOption) (result app.ContainerCheckUpgradeResult, err error) {
+	data, err := self.Post(function.RouterApiUri("/app/container-upgrade/check"), params)
+	if err != nil {
+		return result, err
+	}
+	err = json.NewDecoder(data).Decode(&result)
+	return result, err
+}
+
+func (self *Client) AppContainerBackupCreate(params *app.ContainerBackupOption) (result app.ContainerBackupResult, err error) {
+	data, err := self.Post(function.RouterApiUri("/app/container-backup/create"), params)
+	if err != nil {
+		return result, err
+	}
+	err = json.NewDecoder(data).Decode(&result)
+	return result, err
+}

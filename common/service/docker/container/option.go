@@ -1,0 +1,716 @@
+package container
+
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"math"
+	"net"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
+	"github.com/docker/go-connections/nat"
+	"github.com/docker/go-units"
+	"github.com/donknap/dpanel/common/function"
+	"github.com/donknap/dpanel/common/service/docker/types"
+	"github.com/donknap/dpanel/common/types/define"
+)
+
+type Option func(builder *Builder) error
+
+func WithContainerInfo(containerInfo container.InspectResponse) Option {
+	return func(self *Builder) error {
+		containerInfo, err := self.dockerSdk.ContainerInspectCompat(containerInfo)
+		if err != nil {
+			return err
+		}
+		if containerInfo.Config != nil {
+			containerConfig := *containerInfo.Config
+			self.containerConfig = &containerConfig
+		}
+		if containerInfo.HostConfig != nil {
+			hostConfig := *containerInfo.HostConfig
+			self.hostConfig = &hostConfig
+		}
+		return nil
+	}
+}
+
+func WithContainerName(name string) Option {
+	return func(self *Builder) error {
+		self.containerName = name
+		return nil
+	}
+}
+
+func WithHostname(name string) Option {
+	return func(self *Builder) error {
+		if name != "" {
+			self.containerConfig.Hostname = name
+		}
+		return nil
+	}
+}
+
+func WithDomainName(name string) Option {
+	return func(self *Builder) error {
+		self.containerConfig.Domainname = name
+		return nil
+	}
+}
+
+func WithEnv(item ...types.EnvItem) Option {
+	return func(self *Builder) error {
+		self.containerConfig.Env = function.PluckArrayWalk(item, func(i types.EnvItem) (string, bool) {
+			if i.Name == "" {
+				return "", false
+			}
+			return fmt.Sprintf("%s=%s", i.Name, i.Value), true
+		})
+		return nil
+	}
+}
+
+func WithImage(imageName string) Option {
+	return func(self *Builder) error {
+		if imageName == "" {
+			return errors.New("image name is empty")
+		}
+		self.containerConfig.Image = imageName
+		return nil
+	}
+}
+
+func WithImageDigest() Option {
+	return func(self *Builder) error {
+		imageDigest := ""
+		imageInfo, err := self.dockerSdk.Client.ImageInspect(self.dockerSdk.Ctx, self.containerConfig.Image)
+		if err != nil {
+			slog.Warn("record container image digest", "image", self.containerConfig.Image, "error", err)
+		} else {
+			imageDigest = strings.Join(imageInfo.RepoDigests, ",")
+		}
+		self.containerConfig.Labels = maps.Clone(self.containerConfig.Labels)
+		if self.containerConfig.Labels == nil {
+			self.containerConfig.Labels = make(map[string]string)
+		}
+		self.containerConfig.Labels[define.DPanelLabelImageDigest] = imageDigest
+		return nil
+	}
+}
+
+// WithContainerRollback 将旧容器纳入替换事务；新容器创建失败时恢复旧容器，创建成功后按需保留备份。
+func WithContainerRollback(containerInfo container.InspectResponse, enableBak bool) Option {
+	return func(self *Builder) error {
+		self.rollback = &containerRollback{
+			containerInfo: containerInfo,
+			enableBak:     enableBak,
+		}
+		return nil
+	}
+}
+
+func WithImageRuntimeConfig(enable bool) Option {
+	return func(self *Builder) error {
+		if !enable {
+			return nil
+		}
+		self.containerConfig.Env = nil
+		self.containerConfig.Cmd = nil
+		self.containerConfig.Entrypoint = nil
+		self.containerConfig.WorkingDir = ""
+		self.containerConfig.User = ""
+		self.containerConfig.Healthcheck = nil
+		self.containerConfig.StopSignal = ""
+		self.containerConfig.Shell = nil
+		return nil
+	}
+}
+
+func WithRestartPolicy(restartPolicy *types.RestartPolicy) Option {
+	return func(self *Builder) error {
+		if restartPolicy.Name == "" {
+			restartPolicy.Name = "no"
+		}
+		self.hostConfig.RestartPolicy = container.RestartPolicy{}
+		self.hostConfig.RestartPolicy.Name = function.ParseRestartPolicy(restartPolicy.Name)
+		if self.hostConfig.RestartPolicy.Name == container.RestartPolicyOnFailure {
+			self.hostConfig.RestartPolicy.MaximumRetryCount = restartPolicy.MaxAttempt
+		}
+		return nil
+	}
+}
+
+func WithPrivileged(b bool) Option {
+	return func(self *Builder) error {
+		self.hostConfig.Privileged = b
+		return nil
+	}
+}
+
+func WithSecurityOpt(items ...string) Option {
+	return func(self *Builder) error {
+		self.hostConfig.SecurityOpt = append([]string(nil), items...)
+		return nil
+	}
+}
+
+func WithRuntime(runtime string) Option {
+	return func(self *Builder) error {
+		self.hostConfig.Runtime = runtime
+		return nil
+	}
+}
+
+func WithCgroupnsMode(mode container.CgroupnsMode) Option {
+	return func(self *Builder) error {
+		if mode.IsEmpty() {
+			return nil
+		}
+		if !mode.Valid() {
+			return fmt.Errorf("invalid cgroup namespace mode %q", mode)
+		}
+		self.hostConfig.CgroupnsMode = mode
+		return nil
+	}
+}
+
+func WithReadonlyRootfs(readonly bool) Option {
+	return func(self *Builder) error {
+		self.hostConfig.ReadonlyRootfs = readonly
+		return nil
+	}
+}
+
+func WithSysctls(items map[string]string) Option {
+	return func(self *Builder) error {
+		self.hostConfig.Sysctls = make(map[string]string, len(items))
+		for key, value := range items {
+			self.hostConfig.Sysctls[key] = value
+		}
+		return nil
+	}
+}
+
+func WithTmpfs(items ...types.VolumeItem) Option {
+	return func(self *Builder) error {
+		self.hostConfig.Tmpfs = make(map[string]string, len(items))
+		for _, item := range items {
+			if item.Dest == "" {
+				return errors.New("tmpfs dest path is empty")
+			}
+			if item.Permission == "readonly" {
+				self.hostConfig.Tmpfs[item.Dest] = "ro"
+			} else {
+				// Empty options let Docker apply its default tmpfs size and mount flags.
+				self.hostConfig.Tmpfs[item.Dest] = ""
+			}
+		}
+		return nil
+	}
+}
+
+func WithVolume(item ...types.VolumeItem) Option {
+	return func(self *Builder) error {
+		self.hostConfig.Binds = make([]string, 0)
+		self.hostConfig.Mounts = slices.DeleteFunc(self.hostConfig.Mounts, func(item mount.Mount) bool {
+			return item.Type == mount.TypeImage
+		})
+
+		for _, volumeItem := range item {
+			if volumeItem.Dest == "" || volumeItem.Host == "" {
+				return errors.New("volume host path or dest path is empty")
+			}
+			if volumeItem.Type == string(mount.TypeImage) {
+				self.hostConfig.Mounts = append(self.hostConfig.Mounts, mount.Mount{
+					Type: mount.TypeImage, Source: volumeItem.Host, Target: volumeItem.Dest, ReadOnly: true,
+				})
+				continue
+			}
+			permission := "rw"
+			if volumeItem.Permission == "readonly" {
+				permission = "ro"
+			}
+			bind := fmt.Sprintf("%s:%s:%s", volumeItem.Host, volumeItem.Dest, permission)
+			if index, ok := function.IndexArrayWalk(self.hostConfig.Binds, func(i string) bool {
+				return strings.Contains(i, ":"+volumeItem.Dest+":")
+			}); ok {
+				self.hostConfig.Binds[index] = bind
+			} else {
+				self.hostConfig.Binds = append(self.hostConfig.Binds, bind)
+			}
+		}
+		return nil
+	}
+}
+
+func WithVolumesFrom(item ...types.LinkItem) Option {
+	containerList := make([]string, 0)
+	for _, linkItem := range item {
+		if linkItem.Volume {
+			containerList = append(containerList, linkItem.Name)
+		}
+	}
+	return WithVolumesFromContainerName(containerList...)
+}
+
+func WithVolumesFromContainerName(item ...string) Option {
+	return func(self *Builder) error {
+		if self.hostConfig.VolumesFrom == nil {
+			self.hostConfig.VolumesFrom = make([]string, 0)
+		}
+		for _, containerName := range item {
+			if !function.InArray(self.hostConfig.VolumesFrom, containerName) {
+				self.hostConfig.VolumesFrom = append(self.hostConfig.VolumesFrom, containerName)
+			}
+		}
+		return nil
+	}
+}
+
+func WithPort(item ...types.PortItem) Option {
+	return func(self *Builder) error {
+		self.containerConfig.ExposedPorts = make(nat.PortSet)
+		self.hostConfig.PortBindings = make(nat.PortMap)
+		for _, portItem := range item {
+			portItem = portItem.Parse()
+			bind, err := nat.ParsePortSpec(fmt.Sprintf("%s:%s:%s/%s", portItem.HostIp, portItem.Host, portItem.Dest, portItem.Protocol))
+			if err != nil {
+				return err
+			}
+			for _, mapping := range bind {
+				self.containerConfig.ExposedPorts[mapping.Port] = struct{}{}
+				if self.hostConfig.PortBindings[mapping.Port] == nil {
+					self.hostConfig.PortBindings[mapping.Port] = make([]nat.PortBinding, 0)
+				}
+				self.hostConfig.PortBindings[mapping.Port] = append(self.hostConfig.PortBindings[mapping.Port], mapping.Binding)
+			}
+		}
+		return nil
+	}
+}
+
+func WithPublishAllPorts(b bool) Option {
+	return func(self *Builder) error {
+		self.hostConfig.PublishAllPorts = b
+		return nil
+	}
+}
+
+func WithLink(item ...types.LinkItem) Option {
+	return func(self *Builder) error {
+		for _, linkItem := range item {
+			if linkItem.Alise == "" {
+				continue
+			}
+			// 关联网络时，重新退出加入
+			err := self.dockerSdk.Client.NetworkDisconnect(self.dockerSdk.Ctx, self.containerName, linkItem.Name, true)
+			if err != nil {
+				return err
+			}
+			return self.dockerSdk.Client.NetworkConnect(self.dockerSdk.Ctx, self.containerName, linkItem.Name, &network.EndpointSettings{
+				Aliases: []string{
+					linkItem.Alise,
+				},
+			})
+		}
+		return nil
+	}
+}
+
+// WithNetwork 不在构建时加入网络，会导致 bridge 网络无法加入
+func WithNetwork(item ...types.NetworkItem) Option {
+	return func(self *Builder) error {
+		for _, networkRow := range item {
+			if networkRow.Alise == nil {
+				networkRow.Alise = make([]string, 0)
+			}
+			dpanelHostName := fmt.Sprintf("%s.pod.dpanel.local", self.containerName)
+			if !function.InArray(networkRow.Alise, dpanelHostName) {
+				networkRow.Alise = append(networkRow.Alise, dpanelHostName)
+			}
+			endpointSetting := &network.EndpointSettings{
+				Aliases:    networkRow.Alise,
+				IPAMConfig: &network.EndpointIPAMConfig{},
+			}
+			if networkRow.IpV4 != "" {
+				endpointSetting.IPAMConfig.IPv4Address = networkRow.IpV4
+			}
+			if networkRow.IpV6 != "" {
+				endpointSetting.IPAMConfig.IPv6Address = networkRow.IpV6
+			}
+			if err := WithNetworkEndpoint(networkRow.Name, endpointSetting)(self); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func WithNetworkEndpoint(name string, endpoint *network.EndpointSettings) Option {
+	return func(self *Builder) error {
+		if name == "" || endpoint == nil {
+			return nil
+		}
+		if self.networkingConfig == nil {
+			self.networkingConfig = &network.NetworkingConfig{}
+		}
+		if self.networkingConfig.EndpointsConfig == nil {
+			self.networkingConfig.EndpointsConfig = make(map[string]*network.EndpointSettings)
+		}
+		self.networkingConfig.EndpointsConfig[name] = endpoint
+		return nil
+	}
+}
+
+func WithNetworkMode(mode container.NetworkMode) Option {
+	return func(self *Builder) error {
+		self.hostConfig.NetworkMode = mode
+		return nil
+	}
+}
+
+func WithAutoRemove(b bool) Option {
+	return func(self *Builder) error {
+		self.hostConfig.AutoRemove = b
+		return nil
+	}
+}
+
+func WithCpus(count float32) Option {
+	return func(self *Builder) error {
+		if count == 0 {
+			return nil
+		}
+		self.hostConfig.NanoCPUs = int64(count * 1000000000)
+		return nil
+	}
+}
+
+func WithMemory(size int) Option {
+	return func(self *Builder) error {
+		if size == 0 {
+			return nil
+		}
+		self.hostConfig.Memory = int64(size) * 1024 * 1024
+		return nil
+	}
+}
+
+// WithMemorySwap 设置内存与 swap 的总上限（MiB）；nil 保留原配置，0 恢复默认，-1 不限。
+// 正数依赖已设置的内存上限，应在 WithMemory 之后应用。
+func WithMemorySwap(size *int64) Option {
+	return func(self *Builder) error {
+		if size == nil {
+			return nil
+		}
+		if *size < -1 || *size > math.MaxInt64/(1024*1024) {
+			return errors.New("memory swap limit is out of range")
+		}
+		if *size <= 0 {
+			self.hostConfig.MemorySwap = *size
+			return nil
+		}
+		if self.hostConfig.Memory <= 0 {
+			return errors.New("memory swap limit requires a memory limit")
+		}
+		if *size*1024*1024 < self.hostConfig.Memory {
+			return errors.New("memory swap total must be greater than or equal to the memory limit")
+		}
+		self.hostConfig.MemorySwap = *size * 1024 * 1024
+		return nil
+	}
+}
+
+func WithShmSize(size string) Option {
+	return func(self *Builder) error {
+		d, _ := units.RAMInBytes(size)
+		if d == 0 {
+			return nil
+		}
+		self.hostConfig.ShmSize = d
+		return nil
+	}
+}
+
+func WithWorkDir(path string) Option {
+	return func(self *Builder) error {
+		if path == "" {
+			return nil
+		}
+		self.containerConfig.WorkingDir = path
+		return nil
+	}
+}
+
+func WithUser(user string) Option {
+	return func(self *Builder) error {
+		self.containerConfig.User = user
+		return nil
+	}
+}
+
+func WithCommandStr(cmd string) Option {
+	return WithCommand(function.SplitCommandArray(cmd))
+}
+
+func WithCommand(cmd []string) Option {
+	return func(self *Builder) error {
+		if cmd == nil || len(cmd) == 0 {
+			self.containerConfig.Cmd = nil
+			return nil
+		}
+		self.containerConfig.Cmd = cmd
+		return nil
+	}
+}
+
+func WithEntrypointStr(cmd string) Option {
+	return WithEntrypoint(function.SplitCommandArray(cmd))
+}
+
+func WithEntrypoint(cmd []string) Option {
+	return func(self *Builder) error {
+		if cmd == nil || len(cmd) == 0 {
+			self.containerConfig.Entrypoint = nil
+			return nil
+		}
+		self.containerConfig.Entrypoint = cmd
+		return nil
+	}
+}
+
+func WithHostPid() Option {
+	return WithPid("host")
+}
+
+func WithContainerPid(containerName string) Option {
+	return WithPid(fmt.Sprintf("container:%s", containerName))
+}
+
+func WithPid(s string) Option {
+	return func(self *Builder) error {
+		self.hostConfig.PidMode = container.PidMode(s)
+		return nil
+	}
+}
+
+func WithStdioKeepAlive(enable bool) Option {
+	return func(self *Builder) error {
+		self.containerConfig.AttachStdin = enable
+		self.containerConfig.AttachStdout = enable
+		self.containerConfig.AttachStderr = enable
+		self.containerConfig.OpenStdin = enable
+		return nil
+	}
+}
+
+func WithHostNetwork() Option {
+	return func(self *Builder) error {
+		self.hostConfig.NetworkMode = network.NetworkHost
+		return nil
+	}
+}
+
+func WithContainerNetwork(containerName string) Option {
+	return func(self *Builder) error {
+		self.hostConfig.NetworkMode = container.NetworkMode(fmt.Sprintf("container:%s", containerName))
+		return nil
+	}
+}
+
+func WithLog(item *types.LogDriverItem) Option {
+	return func(self *Builder) error {
+		if item == nil || item.Driver == "" {
+			return nil
+		}
+		self.hostConfig.LogConfig = container.LogConfig{
+			Type:   item.Driver,
+			Config: make(map[string]string),
+		}
+		if item.MaxSize != "" {
+			self.hostConfig.LogConfig.Config["max-size"] = item.MaxSize
+		}
+		if item.MaxFile != "" {
+			self.hostConfig.LogConfig.Config["max-file"] = item.MaxFile
+		}
+		return nil
+	}
+}
+
+func WithDns(ip []string) Option {
+	return func(self *Builder) error {
+		self.hostConfig.DNS = function.PluckArrayWalk(ip, func(item string) (string, bool) {
+			return item, net.ParseIP(item) != nil
+		})
+		return nil
+	}
+}
+
+func WithLabel(item ...types.ValueItem) Option {
+	return func(self *Builder) error {
+		if self.containerConfig.Labels == nil {
+			self.containerConfig.Labels = make(map[string]string)
+		}
+		for _, row := range item {
+			self.containerConfig.Labels[row.Name] = row.Value
+		}
+		return nil
+	}
+}
+
+func WithLabels(item ...types.ValueItem) Option {
+	return func(self *Builder) error {
+		if len(item) == 0 {
+			self.containerConfig.Labels = nil
+			return nil
+		}
+		self.containerConfig.Labels = function.PluckArrayMapWalk(item, func(row types.ValueItem) (string, string, bool) {
+			return row.Name, row.Value, row.Name != ""
+		})
+		return nil
+	}
+}
+
+func WithExtraHosts(item ...types.ValueItem) Option {
+	return func(self *Builder) error {
+		if self.hostConfig.ExtraHosts == nil {
+			self.hostConfig.ExtraHosts = make([]string, 0)
+		}
+		for _, valueItem := range item {
+			host := fmt.Sprintf("%s:%s", valueItem.Name, valueItem.Value)
+			if !function.InArray(self.hostConfig.ExtraHosts, host) {
+				self.hostConfig.ExtraHosts = append(self.hostConfig.ExtraHosts, host)
+			}
+		}
+		return nil
+	}
+}
+
+func WithDevice(item ...types.DeviceItem) Option {
+	return func(self *Builder) error {
+		self.hostConfig.Devices = make([]container.DeviceMapping, 0)
+
+		for _, deviceItem := range item {
+			self.hostConfig.Devices = append(self.hostConfig.Devices, container.DeviceMapping{
+				PathOnHost:        deviceItem.Host,
+				PathInContainer:   deviceItem.Dest,
+				CgroupPermissions: "rwm",
+			})
+		}
+		return nil
+	}
+}
+
+func WithGpus(item *types.GpusItem) Option {
+	return func(self *Builder) error {
+		if item == nil {
+			return nil
+		}
+		self.hostConfig.DeviceRequests = make([]container.DeviceRequest, 0)
+		if !item.Enable {
+			return nil
+		}
+
+		if function.IsEmptyArray(item.Device) {
+			item.Device = []string{
+				"all",
+			}
+		}
+		if function.IsEmptyArray(item.Capabilities) {
+			item.Capabilities = []string{
+				"gpu",
+			}
+		}
+		self.hostConfig.DeviceRequests = append(self.hostConfig.DeviceRequests, container.DeviceRequest{
+			DeviceIDs: item.Device,
+			Capabilities: [][]string{
+				item.Capabilities,
+			},
+			Driver: "nvidia",
+		})
+		return nil
+	}
+}
+
+func WithHealthcheck(item *types.HealthcheckItem) Option {
+	return func(self *Builder) error {
+		if item == nil || item.Cmd == "" {
+			return nil
+		}
+		if v := function.SplitCommandArray(item.Cmd); len(v) > 1 && (strings.ToUpper(v[0]) == "CMD" || strings.ToUpper(v[0]) == "CMD-SHELL") {
+			item.ShellType = v[0]
+			item.Cmd = strings.TrimPrefix(item.Cmd, v[0])
+		}
+		self.containerConfig.Healthcheck = &container.HealthConfig{
+			Timeout:  time.Duration(item.Timeout) * time.Second,
+			Retries:  item.Retries,
+			Interval: time.Duration(item.Interval) * time.Second,
+			Test: append([]string{
+				item.ShellType,
+				item.Cmd,
+			}),
+		}
+		// cmd 模式需要拆分参数
+		if item.ShellType == "CMD" {
+			self.containerConfig.Healthcheck.Test = append([]string{
+				item.ShellType,
+			}, function.SplitCommandArray(item.Cmd)...)
+		}
+		return nil
+	}
+}
+
+func WithCap(caps ...string) Option {
+	return func(self *Builder) error {
+		if function.IsEmptyArray(caps) {
+			return nil
+		}
+		if function.InArray(caps, "ALL") {
+			self.hostConfig.CapAdd = []string{
+				"ALL",
+			}
+		} else {
+			self.hostConfig.CapAdd = caps
+		}
+		return nil
+	}
+}
+
+func WithCapDrop(caps ...string) Option {
+	return func(self *Builder) error {
+		if function.IsEmptyArray(caps) {
+			return nil
+		}
+		if function.InArray(caps, "ALL") {
+			self.hostConfig.CapDrop = []string{
+				"ALL",
+			}
+		} else {
+			self.hostConfig.CapDrop = caps
+		}
+		return nil
+	}
+}
+
+func WithGroupAdd(gid ...string) Option {
+	return func(self *Builder) error {
+		if function.IsEmptyArray(gid) {
+			return nil
+		}
+		self.hostConfig.GroupAdd = gid
+		return nil
+	}
+}
+
+func WithInit(enable bool) Option {
+	return func(self *Builder) error {
+		self.hostConfig.Init = function.Ptr(enable)
+		return nil
+	}
+}
