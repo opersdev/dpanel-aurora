@@ -358,27 +358,43 @@
         <div class="term-input"><span>$</span><input id="term-input" autocomplete="off" spellcheck="false" placeholder="输入命令并回车"></div>
       </div>`;
       const view = $('#term-view', body), input = $('#term-input', body);
-      const type = '/console/container/' + id;
-      let off;
       const write = s => { view.textContent += s; view.scrollTop = view.scrollHeight; };
+      /* 后端契约：容器终端是独立 WS 端点 /dpanel/ws/common/console/container/:id
+         （不是主 notice WS 的 topic）。上行直接发命令 JSON，下行为 {type,data} 信封 */
+      const msgType = '/console/container/' + id;
+      const termSend = cmd => {
+        if (termWs && termWs.readyState === 1) termWs.send(JSON.stringify({ type: msgType, size: { width: 80, height: 24 }, content: { command: cmd } }));
+      };
+      let termWs = null;
       if (DP.state.demo) {
         view.textContent = '演示模式终端（模拟输出）\n\n/ # ';
         write('\n提示：连接真实面板后可执行容器内的 shell 命令。\n/ # ');
       } else {
-        DP.connectWs();
-        off = DP.onWs(type, data => { write(typeof data === 'string' ? data : JSON.stringify(data)); });
-        const open = () => {
-          DP.sendWs({ type, size: { width: 80, height: 24 }, content: { command: '' } });
-        };
-        if (DP.state.ws && DP.state.ws.readyState === 1) open();
-        else { const o = DP.onWs('event:fd', () => { open(); o(); }); setTimeout(() => { if (view.textContent.startsWith('正在连接')) view.textContent = '终端连接超时，请检查面板 WebSocket 是否可访问。'; }, 5000); }
+        const s = DP.state;
+        const scheme = s.baseUrl.startsWith('https') ? 'wss' : 'ws';
+        const host = s.baseUrl.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+        const prefix = s.baseUrl.replace(/\/+$/, '').replace(/^https?:\/\/[^/]+/, '');
+        const url = scheme + '://' + host + prefix + '/dpanel/ws/common/console/container/' + encodeURIComponent(id) + '?token=' + encodeURIComponent(s.token || '');
+        try { termWs = new WebSocket(url); } catch (e) { view.textContent = '终端连接失败：' + e.message; }
+        if (termWs) {
+          termWs.onopen = () => termSend('');
+          termWs.onmessage = ev => {
+            let m; try { m = JSON.parse(ev.data); } catch (e) { write(ev.data); return; }
+            if (m.type === msgType) {
+              if (view.textContent.startsWith('正在连接终端…')) view.textContent = '';
+              write(typeof m.data === 'string' ? m.data : String(m.data == null ? '' : JSON.stringify(m.data)));
+            }
+          };
+          termWs.onerror = () => { if (view.textContent.startsWith('正在连接终端…')) view.textContent = '终端连接失败，请检查面板 WebSocket 是否可访问。'; };
+          setTimeout(() => { if (view.textContent.startsWith('正在连接终端…')) view.textContent = '终端连接超时，请检查面板 WebSocket 是否可访问。'; }, 8000);
+        }
       }
-      body._cleanup = () => { if (off) off(); DP.sendWs({ type: 'progress:close', data: type }); };
+      body._cleanup = () => { try { if (termWs) termWs.close(); } catch (e) {} };
       input.addEventListener('keydown', e => {
         if (e.key !== 'Enter') return;
         const cmd = input.value; input.value = '';
         if (DP.state.demo) { write('\nsh: ' + esc(cmd) + ': not found in demo\n/ # '); return; }
-        DP.sendWs({ type, size: { width: 80, height: 24 }, content: { command: cmd + '\n' } });
+        termSend(cmd + '\n');
       });
       $('[data-act="term-clear"]', body).onclick = () => view.textContent = '';
       $('[data-act="term-close"]', body).onclick = () => { if (body._cleanup) body._cleanup(); view.textContent += '\n[连接已断开]\n'; };
@@ -593,8 +609,8 @@
       const cntOf = x => allContainers.filter(cc => cc.project === x.name).length;
       root.innerHTML = DP.searchbar('compose-search', '搜索项目…', DP.ui.composeQuery) +
         `<div class="row between" style="margin-bottom:10px"><span class="small muted">共 ${list.length} 个编排项目</span><div class="row">${DP.iconBtn('refresh', 'refresh')}${DP.iconBtn('create', 'plus')}</div></div>` +
-        (list.length ? list.map(x => `<div class="item-card" data-id="${esc(String(x.id))}"><div class="row"><div class="avatar-sm" style="background:var(--primary-soft);color:var(--primary)">${icon('code')}</div><div class="grow"><div class="title">${esc(x.title || x.name)}</div><div class="sub">${esc(x.name)} · ${cntOf(x)} 个容器 · ${esc(typeOf(x))}</div></div><span class="chip ${isRunning(x) ? 'green' : ''}">${isRunning(x) ? '已部署' : '未运行'}</span></div>
-          <div class="action-row"><button class="action-btn" data-co="detail">${icon('eye')}查看 YAML</button><button class="action-btn" data-co="deploy">${icon('play')}部署</button><button class="action-btn" data-co="destroy">${icon('stop')}销毁</button></div></div>`).join('') : DP.empty('暂无 Compose 项目', 'code'));
+        (list.length ? list.map(x => `<div class="item-card" data-id="${esc(String(x.id))}"${x.id ? '' : ' data-ext="1"'}><div class="row"><div class="avatar-sm" style="background:var(--primary-soft);color:var(--primary)">${icon('code')}</div><div class="grow"><div class="title">${esc(x.title || x.name)}</div><div class="sub">${esc(x.name)} · ${cntOf(x)} 个容器 · ${esc(typeOf(x))}</div></div><span class="chip ${isRunning(x) ? 'green' : ''}">${isRunning(x) ? '已部署' : '未运行'}</span></div>
+          ${x.id ? `<div class="action-row"><button class="action-btn" data-co="detail">${icon('eye')}查看 YAML</button><button class="action-btn" data-co="deploy">${icon('play')}部署</button><button class="action-btn" data-co="destroy">${icon('stop')}销毁</button></div>` : `<div class="small muted" style="padding:4px 8px">外部编排项目 · 后端未收录，仅展示状态</div>`}</div>`).join('') : DP.empty('暂无 Compose 项目', 'code'));
       this.bind(root);
     },
     bind(root) {

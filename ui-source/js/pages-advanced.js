@@ -582,7 +582,7 @@
           ${[['check-update', 'sparkles', '检查更新'], ['panel-backup', 'download', '创建面板备份'], ['backup-list', 'file', '备份列表'], ['panel-usage', 'chart', '磁盘占用'], ['clear-cache', 'trash', '清理缓存']].map(([a, ic, t]) => `<button class="drawer-link" data-set="${a}">${icon(ic)}<span class="grow">${t}</span>${icon('chevron-right', 'sm')}</button>`).join('')}
         </div>
         <div class="card"><div class="card-head"><h3>关于</h3></div>
-          <div class="small muted">DPanel Mobile v1.0 · 基于开源项目 donknap/dpanel 的 API 构建。<br>本项目与 DPanel 官方无关联。</div>
+          <div class="small muted">DPanel Mobile v${DP.VERSION} · 基于开源项目 donknap/dpanel 的 API 构建。<br>本项目与 DPanel 官方无关联。</div>
         </div>`;
       $('#set-dark', root).onclick = e => { const on = !e.currentTarget.classList.contains('on'); DP.toggle(e.currentTarget, on); DP.setTheme(on ? 'dark' : 'light'); };
       $('#set-follow', root).onclick = e => { const on = !e.currentTarget.classList.contains('on'); DP.toggle(e.currentTarget, on); if (on) { const dark = matchMedia('(prefers-color-scheme: dark)').matches; DP.setTheme(dark ? 'dark' : 'light'); $('#set-dark').classList.toggle('on', dark); } };
