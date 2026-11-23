@@ -692,17 +692,32 @@
       });
     },
     create() {
+      /* 后端 /app/compose/create 的 type 合法值：text(本地YAML)/remoteUrl(远程URL)/storagePath/store
+         之前发 local/uri/git 不在白名单，Uri 不会自动生成 → 报 invalid compose configuration path。
+         storagePath 需要单独接口传 uri，创建场景先支持 text 与 remoteUrl */
       DP.sheet({ title: '创建 Compose 项目',
-        body: `<div class="form-field"><label>项目名称</label><input id="co-name" placeholder="my-project"></div>
+        body: `<div class="form-field"><label>项目名称（小写字母、数字、连字符）</label><input id="co-name" placeholder="my-project"></div>
           <div class="form-field"><label>显示标题</label><input id="co-title" placeholder="我的应用"></div>
-          <div class="form-field"><label>来源</label><select id="co-type"><option value="local">本地 YAML</option><option value="uri">远程 URL</option><option value="git">Git 仓库</option></select></div>
-          <div class="form-field"><label>YAML 内容 / 地址</label><textarea id="co-yaml" placeholder="services:\n  app:\n    image: nginx:alpine"></textarea></div>`,
+          <div class="form-field"><label>来源</label><select id="co-type"><option value="text">本地 YAML</option><option value="remoteUrl">远程 URL</option></select></div>
+          <div class="form-field"><label id="co-yaml-label">YAML 内容</label><textarea id="co-yaml" style="min-height:180px" placeholder="services:&#10;  app:&#10;    image: nginx:alpine"></textarea></div>`,
         actions: `<button class="btn ghost grow" data-act="cancel">取消</button><button class="btn primary grow" data-act="ok">创建</button>` });
       $('[data-act="cancel"]', $('#sheet-root')).onclick = DP.closeSheet;
+      $('#co-type', $('#sheet-root')).onchange = () => {
+        const isUrl = $('#co-type').value === 'remoteUrl';
+        $('#co-yaml-label').textContent = isUrl ? 'compose yaml 地址（http/https 直链）' : 'YAML 内容';
+        $('#co-yaml').placeholder = isUrl ? 'https://example.com/docker-compose.yml' : 'services:\n  app:\n    image: nginx:alpine';
+      };
       $('[data-act="ok"]', $('#sheet-root')).onclick = async () => {
-        const name = $('#co-name').value.trim(), yaml = $('#co-yaml').value.trim();
-        if (!name || !yaml) return DP.toast('请填写项目名称与内容', 'err');
-        await safe(async () => { await DP.api('/app/compose/create', { name, title: $('#co-title').value.trim() || name, yaml, type: $('#co-type').value }); DP.closeSheet(); DP.toast('项目已创建', 'ok'); pages.compose.render(DP.$('#content')); });
+        const name = $('#co-name').value.trim(), content = $('#co-yaml').value.trim();
+        const type = $('#co-type').value;
+        if (!name || !content) return DP.toast('请填写项目名称与内容', 'err');
+        if (!/^[a-z0-9][a-z0-9_-]*$/.test(name)) return DP.toast('项目名称需为小写字母/数字/连字符（后端要求 lowercase）', 'err');
+        await safe(async () => {
+          const payload = { name, title: $('#co-title').value.trim() || name, type };
+          if (type === 'remoteUrl') payload.remoteUrl = content; else payload.yaml = content;
+          await DP.api('/app/compose/create', payload);
+          DP.closeSheet(); DP.toast('项目已创建', 'ok'); pages.compose.render(DP.$('#content'));
+        });
       };
     }
   };
